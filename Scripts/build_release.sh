@@ -7,7 +7,7 @@
 # a Developer ID identity (see docs/RELEASE.md).
 #
 # Output (default development flavor):
-#   build/DerivedData/Build/Products/Release/ProcExp (Dev).app
+#   build/DerivedData-Development/Build/Products/Release/ProcExp (Dev).app
 #   build/ProcExp-Dev.dmg   (unless PACKAGE_DMG=0; local testing only)
 #
 set -euo pipefail
@@ -17,7 +17,6 @@ cd "$REPO_ROOT"
 
 BUILD_DIR="$REPO_ROOT/build"
 DERIVED="$BUILD_DIR/DerivedData"
-PRODUCTS="$DERIVED/Build/Products/Release"
 STAGE="$BUILD_DIR/dmg-stage"
 PACKAGE_DMG="${PACKAGE_DMG:-1}"
 BUILD_FLAVOR="${PROCEXP_BUILD_FLAVOR:-development}"
@@ -40,6 +39,7 @@ case "$BUILD_FLAVOR" in
         DMG_VOLUME_NAME="Process Explorer"
         ;;
     development)
+        DERIVED="$BUILD_DIR/DerivedData-Development"
         APP_BUNDLE_ID="com.sysinternals.procexpmac.dev"
         APP_DISPLAY_NAME="Process Explorer (Dev)"
         APP_WRAPPER_NAME="ProcExp (Dev).app"
@@ -52,6 +52,7 @@ case "$BUILD_FLAVOR" in
         ;;
     *) fail "PROCEXP_BUILD_FLAVOR must be development or official" ;;
 esac
+PRODUCTS="$DERIVED/Build/Products/Release"
 APP="$PRODUCTS/$APP_WRAPPER_NAME"
 
 [[ "$VERSION" =~ $VERSION_PATTERN ]] || fail \
@@ -77,6 +78,8 @@ xcodebuild \
     -derivedDataPath "$DERIVED" \
     ARCHS="arm64 x86_64" \
     ONLY_ACTIVE_ARCH=NO \
+    CLANG_ENABLE_CODE_COVERAGE=NO \
+    GCC_GENERATE_TEST_COVERAGE=NO \
     MARKETING_VERSION="$VERSION" \
     CURRENT_PROJECT_VERSION="$BUILD_VERSION" \
     "PRODUCT_BUNDLE_IDENTIFIER=$APP_BUNDLE_ID" \

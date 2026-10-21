@@ -97,7 +97,8 @@ actor LaunchdIndex {
                     byExecutablePath[canonical] = plistPath
                 }
                 let base = (canonical as NSString).lastPathComponent
-                if byBasename[base] == nil {
+                // Only a bare program name needs PATH resolution; explicit paths must not alias another executable.
+                if program == (program as NSString).lastPathComponent, byBasename[base] == nil {
                     byBasename[base] = plistPath
                 }
             }

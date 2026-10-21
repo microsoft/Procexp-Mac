@@ -92,8 +92,8 @@ struct MainWindowView: View {
             .confirmationDialog(
                 coordinator.pending?.confirmation.title ?? "",
                 isPresented: Binding(
-                    get: { coordinator.pending != nil },
-                    set: { if !$0 { coordinator.cancel() } }
+                    get: { coordinator.pending?.presentation == .main },
+                    set: { if !$0 && coordinator.pending?.presentation == .main { coordinator.cancel() } }
                 ),
                 presenting: coordinator.pending
             ) { pending in
@@ -110,8 +110,8 @@ struct MainWindowView: View {
             .alert(
                 coordinator.errorTitle,
                 isPresented: Binding(
-                    get: { coordinator.errorMessage != nil },
-                    set: { if !$0 { coordinator.errorMessage = nil } }
+                    get: { coordinator.errorMessage != nil && coordinator.errorPresentation == .main },
+                    set: { if !$0 && coordinator.errorPresentation == .main { coordinator.errorMessage = nil } }
                 )
             ) {
                 Button("OK", role: .cancel) { coordinator.errorMessage = nil }
@@ -177,10 +177,36 @@ struct MainWindowView: View {
     /// followed by the live, individually-resizable CPU/Memory/I-O mini graphs
     /// and the filter field.
     private var toolbar: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 6) {
+                toolbarActions
+                toolbarGraphs
+                Spacer(minLength: 8)
+                toolbarFilter
+            }
+            HStack(spacing: 6) {
+                toolbarActions
+                ScrollView(.horizontal) {
+                    HStack(spacing: 6) {
+                        toolbarGraphs
+                    }
+                }
+                .frame(minWidth: 28, minHeight: 32, maxHeight: 32)
+                Spacer(minLength: 8)
+                toolbarFilter
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity, minHeight: 32, alignment: .leading)
+        .background(.bar)
+    }
+
+    private var toolbarActions: some View {
         @Bindable var model = model
-        return HStack(spacing: 6) {
+        return Group {
             iconButton("save",
-                       tip: "Save (⌘S)",
+                       tip: "Export Process List… (⌘S)",
                        shortcut: .init("s", modifiers: .command)) {
                 saveProcessList()
             }
@@ -211,8 +237,7 @@ struct MainWindowView: View {
                        disabled: model.selection == nil) {
                 if let pid = model.selection { openProperties(pid) }
             }
-            iconButton("kill", tip: "Kill Process (Del)",
-                       shortcut: .init(.deleteForward, modifiers: []),
+            iconButton("kill", tip: "Force Quit Process using SIGKILL (Forward Delete in the process list)",
                        disabled: model.selection == nil) {
                 if let pid = model.selection {
                     coordinator.request(.kill, pid: pid, model: model)
@@ -230,7 +255,7 @@ struct MainWindowView: View {
             toolbarDivider
 
             iconButton("find",
-                       tip: "Find Handle or DLL… (⌘F)",
+                       tip: "Find Mapped Files or File Descriptors… (⌘F)",
                        shortcut: .init("f", modifiers: .command)) {
                 openWindow(id: FindHandleDLLWindow.id)
             }
@@ -240,7 +265,11 @@ struct MainWindowView: View {
             }
 
             toolbarDivider
+        }
+    }
 
+    private var toolbarGraphs: some View {
+        Group {
             // Live, individually-resizable mini history graphs (CPU · Memory ·
             // I/O), placed to the right of all the icon buttons.
             resizableGraph(index: 0,
@@ -257,22 +286,19 @@ struct MainWindowView: View {
                            systemInfoTab: .memory)
             resizableGraph(index: 2,
                            values: model.ioHistory.values,
-                           maxValue: max(1, model.ioHistory.values.max() ?? 1),
+                           maxValue: max(1, model.ioHistory.values.filter(\.isFinite).max() ?? 1),
                            color: RGBA(70, 140, 240),
                            tip: ioTip,
                            systemInfoTab: .io)
 
-            Spacer(minLength: 8)
-
-            TextField("Filter", text: $searchText)
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 200)
-                .focused($searchFocused)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        .frame(maxWidth: .infinity, minHeight: 32, alignment: .leading)
-        .background(.bar)
+    }
+
+    private var toolbarFilter: some View {
+        TextField("Filter", text: $searchText)
+            .textFieldStyle(.roundedBorder)
+            .frame(width: 200)
+            .focused($searchFocused)
     }
 
     private var toolbarDivider: some View {
@@ -382,18 +408,21 @@ struct MainWindowView: View {
     }
 
     private var cpuTip: String {
-        String(format: "CPU: %.1f%%", model.snapshot.system.cpuTotalPercent)
+        if model.snapshot.system.unavailableMetrics.contains(.cpu) { return "CPU: Unavailable" }
+        return String(format: "CPU: %.1f%%", model.snapshot.system.cpuTotalPercent)
     }
 
     private var memTip: String {
         let s = model.snapshot.system
+        guard !s.unavailableMetrics.contains(.memory) else { return "Memory: Unavailable" }
         guard s.memoryTotal > 0 else { return "Memory" }
         return "Memory: \(ByteFormat.bytes(s.memoryUsed)) / \(ByteFormat.bytes(s.memoryTotal))"
     }
 
     private var ioTip: String {
         let rate = model.ioHistory.latest ?? 0
-        return "I/O (disk + network): \(ByteFormat.bytes(UInt64(max(0, rate))))/s"
+        guard rate.isFinite else { return "I/O (disk + network): Unavailable" }
+        return "I/O (disk + network): \(GraphUnit.bytesPerSecond.format(rate))"
     }
 
     /// Export the current process list to a text/CSV file (Procexp "Save").
@@ -401,25 +430,27 @@ struct MainWindowView: View {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.commaSeparatedText, .plainText]
         panel.nameFieldStringValue = "processes.csv"
-        panel.title = "Save Process List"
+        panel.title = "Export Process List"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         let csv = processListCSV()
         do {
             try csv.write(to: url, atomically: true, encoding: .utf8)
         } catch {
-            NSSound.beep()
+            model.processActionAlert = ProcessActionAlert(
+                title: "Could Not Export Process List",
+                message: "\(url.path)\n\n\(error.localizedDescription)"
+            )
         }
     }
 
-    /// Build a CSV of the current snapshot (Process, PID, CPU%, Private Bytes,
-    /// Working Set, User).
+    /// Export byte counts without substituting resident memory for an unavailable footprint.
     private func processListCSV() -> String {
-        var lines = ["Process,PID,CPU %,Private Bytes,Working Set,User"]
+        var lines = ["Process,PID,CPU %,Physical Footprint (bytes),Resident Memory (RSS bytes),User"]
         let records = model.snapshot.processes.values
             .sorted { $0.id.pid < $1.id.pid }
         for r in records {
             func escape(_ s: String) -> String {
-                s.contains(",") || s.contains("\"")
+                s.contains(",") || s.contains("\"") || s.contains("\n") || s.contains("\r")
                     ? "\"\(s.replacingOccurrences(of: "\"", with: "\"\""))\""
                     : s
             }
@@ -427,7 +458,7 @@ struct MainWindowView: View {
                 escape(r.name),
                 String(r.id.pid),
                 String(format: "%.2f", r.cpuPercent),
-                String(r.physFootprint ?? r.residentSize),
+                r.physFootprint.map(String.init) ?? "",
                 String(r.residentSize),
                 escape(r.userName ?? ""),
             ].joined(separator: ",")
@@ -481,20 +512,22 @@ struct MainWindowView: View {
 
     // MARK: Status bar
 
-    /// Compact Procexp-style status bar: CPU usage, commit charge (used/total
-    /// physical memory), process count, and physical-memory usage %, each in
+    /// Compact status bar: CPU usage, RAM in use, process count, and RAM usage %, each in
     /// its own spaced segment and updated live from `model.snapshot.system`.
     private var statusBar: some View {
         let system = model.snapshot.system
         return HStack(spacing: 0) {
             statusSegment("CPU Usage",
-                          String(format: "%.1f%%", system.cpuTotalPercent))
+                          system.unavailableMetrics.contains(.cpu) ? "Unavailable" : String(format: "%.1f%%", system.cpuTotalPercent))
+                .help("Whole-machine CPU usage, normalized to 100% across all logical cores.")
             statusSeparator
-            statusSegment("Commit Charge", memoryText(system))
+            statusSegment("RAM In Use", memoryText(system))
+                .help("Active + wired + compressed memory, relative to installed RAM. Not memory pressure or committed memory.")
             statusSeparator
             statusSegment("Processes", "\(system.processCount)")
             statusSeparator
-            statusSegment("Physical Usage", physicalUsageText(system))
+            statusSegment("RAM Used (%)", physicalUsageText(system))
+                .help("(Active + wired + compressed memory) / installed RAM × 100.")
             Spacer(minLength: 8)
             statusSegment("Refresh", refreshLabel)
         }
@@ -530,6 +563,7 @@ struct MainWindowView: View {
     }
 
     private func memoryText(_ system: SystemStats) -> String {
+        guard !system.unavailableMetrics.contains(.memory) else { return "Unavailable" }
         guard system.memoryTotal > 0 else { return "—" }
         let used = ByteFormat.bytes(system.memoryUsed)
         let total = ByteFormat.bytes(system.memoryTotal)
@@ -538,6 +572,7 @@ struct MainWindowView: View {
 
     /// Physical memory usage as a percentage of installed RAM.
     private func physicalUsageText(_ system: SystemStats) -> String {
+        guard !system.unavailableMetrics.contains(.memory) else { return "Unavailable" }
         guard system.memoryTotal > 0 else { return "—" }
         let pct = Double(system.memoryUsed) / Double(system.memoryTotal) * 100
         return String(format: "%.0f%%", pct)
@@ -622,21 +657,25 @@ private struct ResizableMiniGraph: View {
 
     var body: some View {
         HStack(spacing: 2) {
-            SparklineRepresentable(
-                values: values,
-                maxValue: maxValue,
-                lineColor: color,
-                fillColor: RGBA(r: color.r, g: color.g, b: color.b, a: 0.28),
-                backgroundColor: RGBA(12, 12, 12)
-            )
-            .frame(width: max(minWidth, width), height: graphHeight)
-            .overlay(
-                RoundedRectangle(cornerRadius: 2)
-                    .stroke(Color.primary.opacity(0.25), lineWidth: 0.5)
-            )
-            .contentShape(Rectangle())
-            .onTapGesture(perform: action)
+            Button(action: action) {
+                SparklineRepresentable(
+                    values: values,
+                    maxValue: maxValue,
+                    lineColor: color,
+                    fillColor: RGBA(r: color.r, g: color.g, b: color.b, a: 0.28),
+                    backgroundColor: RGBA(12, 12, 12)
+                )
+                .frame(width: max(minWidth, width), height: graphHeight)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 2)
+                        .stroke(Color.primary.opacity(0.25), lineWidth: 0.5)
+                )
+                .contentShape(Rectangle())
+                .accessibilityHidden(true)
+            }
+            .buttonStyle(.plain)
             .help(tip)
+            .accessibilityLabel(tip)
 
             resizeHandle
         }
@@ -649,7 +688,7 @@ private struct ResizableMiniGraph: View {
             .frame(width: 3, height: graphHeight - 2)
             .contentShape(Rectangle().inset(by: -6))
             .gesture(
-                DragGesture(minimumDistance: 0)
+                DragGesture(minimumDistance: 0, coordinateSpace: .global)
                     .onChanged { value in
                         let start = dragStartWidth ?? width
                         if dragStartWidth == nil { dragStartWidth = start }
@@ -666,7 +705,8 @@ private struct ResizableMiniGraph: View {
 
 /// R1 — a simple "Run…" launcher (Procexp File ▸ Run…, ⌘R). Launches an
 /// executable path or app with `NSWorkspace` / `Process`.
-struct RunProcessSheet: View {    @Environment(\.dismiss) private var dismiss
+struct RunProcessSheet: View {
+    @Environment(\.dismiss) private var dismiss
     @State private var path: String = ""
     @State private var errorMessage: String?
 
@@ -720,7 +760,10 @@ struct RunProcessSheet: View {    @Environment(\.dismiss) private var dismiss
 
         if isApp || !isExecutable {
             // Apps, documents and folders — let the workspace open them.
-            NSWorkspace.shared.open(url)
+            guard NSWorkspace.shared.open(url) else {
+                errorMessage = "Could not open: \(url.path)"
+                return
+            }
             dismiss()
             return
         }

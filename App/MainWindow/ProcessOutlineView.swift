@@ -211,14 +211,15 @@ struct ProcessOutlineView: NSViewRepresentable {
                 item.target = self
                 rowMenu.addItem(item)
             }
-            add("Kill Process", #selector(menuKill(_:)))
-            add("Kill Process Tree", #selector(menuKillTree(_:)))
+            add("Force Quit Process", #selector(menuKill(_:)))
+            add("Force Quit Process Tree", #selector(menuKillTree(_:)))
             add("Suspend / Resume", #selector(menuSuspendResume(_:)))
             rowMenu.addItem(.separator())
 
-            let priorityItem = NSMenuItem(title: "Set Priority", action: nil, keyEquivalent: "")
+            let priorityItem = NSMenuItem(title: "Set Nice Value", action: nil, keyEquivalent: "")
+            priorityItem.toolTip = "Lower POSIX nice values request more CPU scheduling preference and may require elevated privileges. Not a QoS class."
             let priorityMenu = NSMenu()
-            for (title, nice) in [("Idle (19)", 19), ("Below Normal (10)", 10), ("Normal (0)", 0), ("Above Normal (-10)", -10), ("High (-20)", -20)] {
+            for (title, nice) in [("19", 19), ("10", 10), ("0 (default)", 0), ("-10", -10), ("-20", -20)] {
                 let item = NSMenuItem(title: title, action: #selector(menuSetNice(_:)), keyEquivalent: "")
                 item.target = self
                 item.tag = nice
@@ -411,7 +412,7 @@ struct ProcessOutlineView: NSViewRepresentable {
             var workingSetMax: UInt64 = 0
             for row in visibleRows {
                 guard let record = snapshot.processes[row.id] else { continue }
-                privateMax = max(privateMax, record.physFootprint ?? record.residentSize)
+                privateMax = max(privateMax, record.physFootprint ?? 0)
                 workingSetMax = max(workingSetMax, record.residentSize)
             }
             maxVisiblePrivateBytes = privateMax
@@ -1110,8 +1111,7 @@ struct ProcessOutlineView: NSViewRepresentable {
             case .cpu:
                 return CGFloat(record.cpuPercent / 100)
             case .privateBytes:
-                guard maxVisiblePrivateBytes > 0 else { return nil }
-                let value = record.physFootprint ?? record.residentSize
+                guard maxVisiblePrivateBytes > 0, let value = record.physFootprint else { return nil }
                 return CGFloat(Double(value) / Double(maxVisiblePrivateBytes))
             case .workingSet:
                 guard maxVisibleWorkingSet > 0 else { return nil }
@@ -1150,7 +1150,10 @@ struct ProcessOutlineView: NSViewRepresentable {
                 lines.append(description)
             }
             if let company = record.companyName, !company.isEmpty {
-                lines.append(company)
+                lines.append("Organization (inferred): \(company)")
+                if let identifier = record.bundleIdentifier {
+                    lines.append("Bundle identifier: \(identifier)")
+                }
             }
             if let version = record.version, !version.isEmpty {
                 lines.append(version)
@@ -1174,7 +1177,25 @@ struct ProcessOutlineView: NSViewRepresentable {
                 guard let column = metricColumn(at: point.x),
                       let rect = metricCellRect(for: column, rowIndex: rowIndex)?.insetBy(dx: 4, dy: 1),
                       rect.contains(point) else { return nil }
-                return clippedTooltipText(column.string(for: record), in: rect, rightAligned: column.isRightAligned)
+                let value = column.string(for: record)
+                let readout = "\(column.title): \(value.isEmpty ? "Unavailable" : value)"
+                switch column {
+                case .cpu:
+                    return "\(readout)\n100% is one fully busy logical core. A multithreaded process can exceed 100%."
+                case .privateBytes:
+                    return "\(readout)\nPhysical footprint: memory charged to this process. Not resident memory or Windows private bytes. Unavailable values remain blank."
+                case .workingSet:
+                    return "\(readout)\nResident memory (RSS): physical pages resident for the process, distinct from physical footprint."
+                case .company:
+                    return "\(record.companyName ?? "Unavailable")\nInferred from bundle identifier: \(record.bundleIdentifier ?? "unavailable"). Not a verified publisher."
+                case .priority:
+                    return "\(readout)\nObserved task priority, not a Windows priority class, POSIX nice value, or QoS class."
+                case .nice:
+                    return "\(readout)\nPOSIX nice value. Lower values request more CPU scheduling preference and may require elevated privileges."
+                default:
+                    break
+                }
+                return clippedTooltipText(value, in: rect, rightAligned: column.isRightAligned)
             default:
                 return nil
             }
@@ -1229,6 +1250,11 @@ struct ProcessOutlineView: NSViewRepresentable {
         func openPropertiesForSelection() {
             guard let pid = model.selection else { return }
             onCommand(.properties, pid)
+        }
+
+        func requestKillForSelection(tree: Bool) {
+            guard let pid = model.selection, snapshot.processes[pid] != nil else { return }
+            onCommand(tree ? .killTree : .kill, pid)
         }
 
         private func clickedProcessID() -> ProcessID? {
@@ -1616,6 +1642,8 @@ final class ProcessListSurfaceView: NSView {
 
     override func keyDown(with event: NSEvent) {
         switch event.keyCode {
+        case 117 where event.modifierFlags.intersection([.command, .control, .option]).isEmpty:
+            coordinator?.requestKillForSelection(tree: event.modifierFlags.contains(.shift))
         case 36, 76:
             coordinator?.openPropertiesForSelection()
         case 125:

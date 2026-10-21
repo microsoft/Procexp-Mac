@@ -14,10 +14,13 @@ struct FindHandleDLLView: View {
     @State private var query = ""
     @State private var results: [FindHandleDLLResult] = []
     @State private var isSearching = false
+    @State private var wasStopped = false
     @State private var searchedCount = 0
     @State private var totalCount = 0
     @State private var selectedID: FindHandleDLLResult.ID?
     @State private var searchTask: Task<Void, Never>?
+    @State private var readFailureCount = 0
+    @State private var firstReadFailure = ""
 
     var body: some View {
         VStack(spacing: 0) {
@@ -25,17 +28,25 @@ struct FindHandleDLLView: View {
             Divider()
             resultTable
             Divider()
+            if readFailureCount > 0 {
+                Text("\(readFailureCount) resource \(readFailureCount == 1 ? "read" : "reads") failed. \(firstReadFailure)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 12)
+                    .padding(.top, 8)
+            }
             footer
         }
         .frame(minWidth: 780, idealWidth: 860, minHeight: 420, idealHeight: 520)
-        .onDisappear { searchTask?.cancel() }
+        .onDisappear { stopSearch() }
     }
 
     private var header: some View {
         HStack(spacing: 8) {
             Text("Substring")
                 .foregroundStyle(.secondary)
-            TextField("DLL, mapped image, handle path, or name", text: $query)
+            TextField("Mapped image, mapped file, file descriptor path, or name", text: $query)
                 .textFieldStyle(.roundedBorder)
                 .onSubmit { startSearch() }
             Button(isSearching ? "Stop" : "Search") {
@@ -56,7 +67,8 @@ struct FindHandleDLLView: View {
         .overlay {
             if results.isEmpty {
                 ContentUnavailableView(
-                    isSearching ? "Searching…" : "No Results",
+                    isSearching ? "Searching…" : wasStopped ? "Search Stopped"
+                        : readFailureCount > 0 ? "Search Incomplete" : "No Results",
                     systemImage: isSearching ? "magnifyingglass" : "doc.text.magnifyingglass",
                     description: Text(emptyDescription)
                 )
@@ -74,6 +86,10 @@ struct FindHandleDLLView: View {
             } else {
                 Text("\(results.count) matches")
                     .foregroundStyle(.secondary)
+                if wasStopped {
+                    Text("Stopped")
+                        .foregroundStyle(.secondary)
+                }
             }
             Spacer()
             Button("Open") { openSelection() }
@@ -91,12 +107,19 @@ struct FindHandleDLLView: View {
         if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return "Enter text to find matching mapped images or handles."
         }
+        if wasStopped {
+            return "Only completed resource reads are included. Search again to scan all processes."
+        }
+        if !isSearching && readFailureCount > 0 {
+            return "Some mapped images or handles could not be read. See the acquisition error below."
+        }
         return isSearching ? "Matches appear as they are found." : "No mapped image or handle path matched."
     }
 
     private var selectedResult: FindHandleDLLResult? {
-        guard let selectedID else { return nil }
-        return results.first { $0.id == selectedID }
+        guard let selectedID, let result = results.first(where: { $0.id == selectedID }),
+              model.snapshot.processes[result.pid] != nil else { return nil }
+        return result
     }
 
     private func startSearch() {
@@ -107,7 +130,10 @@ struct FindHandleDLLView: View {
         selectedID = nil
         searchedCount = 0
         totalCount = model.snapshot.processes.count
+        readFailureCount = 0
+        firstReadFailure = ""
         isSearching = true
+        wasStopped = false
 
         let processes = model.snapshot.processes.values.sorted { $0.id.pid < $1.id.pid }
         let data = model.data
@@ -115,13 +141,16 @@ struct FindHandleDLLView: View {
             for record in processes {
                 guard !Task.isCancelled else { break }
                 await search(record: record, needle: needle, data: data)
+                guard !Task.isCancelled else { return }
                 searchedCount += 1
             }
+            guard !Task.isCancelled else { return }
             isSearching = false
         }
     }
 
     private func stopSearch() {
+        if isSearching { wasStopped = true }
         searchTask?.cancel()
         searchTask = nil
         isSearching = false
@@ -129,18 +158,25 @@ struct FindHandleDLLView: View {
 
     private func search(record: ProcessRecord, needle: String, data: any ProcessDataProviding) async {
         let query = needle.lowercased()
-        if let modules = try? await data.modules(of: record.id) {
+        do {
+            let modules = try await data.modules(of: record.id)
+            guard !Task.isCancelled else { return }
             for module in modules where matches(module: module, query: query) {
                 results.append(FindHandleDLLResult(
-                    kind: .dll,
+                    kind: module.isMappedFile ? .mappedFile : .dll,
                     pid: record.id,
                     processName: record.name,
                     name: module.name,
                     path: module.path
                 ))
             }
+        } catch {
+            guard !Task.isCancelled else { return }
+            recordReadFailure("Mapped images", record: record, error: error)
         }
-        if let handles = try? await data.fileDescriptors(of: record.id) {
+        do {
+            let handles = try await data.fileDescriptors(of: record.id)
+            guard !Task.isCancelled else { return }
             for handle in handles where matches(handle: handle, query: query) {
                 results.append(FindHandleDLLResult(
                     kind: .handle,
@@ -150,6 +186,16 @@ struct FindHandleDLLView: View {
                     path: handle.name
                 ))
             }
+        } catch {
+            guard !Task.isCancelled else { return }
+            recordReadFailure("File descriptors", record: record, error: error)
+        }
+    }
+
+    private func recordReadFailure(_ source: String, record: ProcessRecord, error: Error) {
+        readFailureCount += 1
+        if readFailureCount == 1 {
+            firstReadFailure = "\(source) for \(record.name) (PID \(record.id.pid)): \(error)"
         }
     }
 
@@ -165,19 +211,21 @@ struct FindHandleDLLView: View {
         guard let result = selectedResult else { return }
         model.selection = result.pid
         model.showLowerPane = true
-        model.lowerPaneMode = result.kind == .dll ? .modules : .handles
+        model.lowerPaneMode = result.kind == .handle ? .handles : .modules
     }
 }
 
 private struct FindHandleDLLResult: Identifiable, Hashable {
     enum Kind: String, Hashable {
         case dll
+        case mappedFile
         case handle
 
         var title: String {
             switch self {
-            case .dll: return "DLL"
-            case .handle: return "Handle"
+            case .dll: return "Mapped Image"
+            case .mappedFile: return "Mapped File"
+            case .handle: return "File Descriptor"
             }
         }
     }
@@ -191,7 +239,7 @@ private struct FindHandleDLLResult: Identifiable, Hashable {
 
     var typeText: String {
         switch kind {
-        case .dll: return "DLL"
+        case .dll, .mappedFile: return kind.title
         case .handle: return name
         }
     }

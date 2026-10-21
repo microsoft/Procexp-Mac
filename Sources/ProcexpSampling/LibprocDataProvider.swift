@@ -19,7 +19,6 @@ public final class LibprocDataProvider: ProcessDataProviding, Sendable {
     private let cpuTracker = CPUDeltaTracker()
     private let memoryTotal: UInt64
     private let supportsModules: Bool
-
     public init() {
         self.memoryTotal = Libproc.physicalMemory()
         // Probe region enumeration once against our own process to decide
@@ -171,9 +170,9 @@ public final class LibprocDataProvider: ProcessDataProviding, Sendable {
         // Task info: CPU / threads / memory / faults (may be absent w/o access).
         var task = Libproc.TaskInfoDetails()
         var hasTaskInfo = false
-        if let ti = Libproc.taskInfo(pid) {
+        if let ti = Libproc.taskInfo(pid), let details = Libproc.taskDetails(ti) {
             hasTaskInfo = true
-            task = Libproc.taskDetails(ti)
+            task = details
         }
 
         // Descriptor count (handle-equivalent).
@@ -270,9 +269,9 @@ public final class LibprocDataProvider: ProcessDataProviding, Sendable {
 
         var task = Libproc.TaskInfoDetails()
         var hasTaskInfo = false
-        if let ti = Libproc.taskInfo(pid) {
+        if let ti = Libproc.taskInfo(pid), let details = Libproc.taskDetails(ti) {
             hasTaskInfo = true
-            task = Libproc.taskDetails(ti)
+            task = details
         }
 
         var physFootprint: UInt64? = nil
@@ -365,23 +364,7 @@ public final class LibprocDataProvider: ProcessDataProviding, Sendable {
         let n = Int(ti.pti_threadnum)
         guard n > 0 else { return [] }
 
-        let details = Libproc.threads(id.pid, expectedCount: n)
-        if !details.isEmpty { return details }
-
-        // Fall back to one stub per live thread when macOS refuses public
-        // per-thread detail. The privileged helper can still fill richer data
-        // for protected/other-user processes when task ports are available.
-        return (0..<n).map { index in
-            ThreadInfo(
-                id: UInt64(index),
-                cpuPercent: 0,
-                cpuTime: 0,
-                state: "",
-                startAddress: nil,
-                startSymbol: nil,
-                basePriority: ti.pti_priority
-            )
-        }
+        return Libproc.threads(id.pid, expectedCount: n)
     }
 
     public func modules(of id: ProcessID) async throws -> [ModuleInfo] {

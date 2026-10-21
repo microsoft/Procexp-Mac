@@ -77,7 +77,16 @@ final class AppModel {
     var columnSets: [ColumnSet] = [] { didSet { persistSettings() } }
     var moduleColumns: [ModuleColumn] = ModuleColumn.defaultColumns { didSet { persistSettings() } }
     var handleColumns: [HandleColumn] = HandleColumn.defaultColumns { didSet { persistSettings() } }
-    var threadColumns: [ThreadColumn] = ThreadColumn.defaultColumns { didSet { persistSettings() } }
+    var threadColumns: [ThreadColumn] = ThreadColumn.defaultColumns {
+        didSet {
+            let normalized = Self.normalizedThreadColumns(threadColumns)
+            if normalized != threadColumns {
+                threadColumns = normalized
+                return
+            }
+            persistSettings()
+        }
+    }
     var colorRules: [ProcessColorRule] = ProcessColorRule.defaults { didSet { persistSettings() } }
 
     // W11 preference toggles.
@@ -197,6 +206,7 @@ final class AppModel {
     /// items (e.g. "Install Privileged Helper…") can disable themselves once the
     /// helper is present.
     private(set) var helperInstalled: Bool = false
+    private(set) var helperApprovalPending: Bool = false
 
     /// The always-available unprivileged provider, kept for fallback.
     private let libproc: LibprocDataProvider
@@ -208,6 +218,8 @@ final class AppModel {
     let autostart: any AutostartProviding
 
     private var streamTask: Task<Void, Never>?
+    private var streamGeneration = 0
+    private var publicationGeneration = 0
 
     // MARK: - Signature enrichment (fix #11)
     //
@@ -251,6 +263,7 @@ final class AppModel {
             self.data = libproc
             self.actions = ProcessActions(privileged: nil)
             self.helperInstalled = false
+            self.helperApprovalPending = PrivilegedDataProvider.helperRequiresApproval()
         }
 
         // W11 — restore persisted preferences, then start tracking changes.
@@ -272,6 +285,8 @@ final class AppModel {
             return (false, """
             The privileged helper could not be registered.
 
+            \(error.localizedDescription)
+
             Make sure the app is signed with a stable (non-ad-hoc) identity and \
             installed in /Applications, then approve the helper in System \
             Settings ▸ General ▸ Login Items & Extensions. The app continues to \
@@ -280,10 +295,15 @@ final class AppModel {
         }
 
         guard PrivilegedDataProvider.isHelperInstalled() else {
-            return (false, """
-            The helper was registered but is not yet enabled. Approve it in \
-            System Settings ▸ General ▸ Login Items & Extensions, then relaunch.
-            """)
+            self.helperApprovalPending = PrivilegedDataProvider.helperRequiresApproval()
+            if helperApprovalPending {
+                return (true, """
+                The helper is registered and awaiting user approval, not yet enabled. \
+                Approve it in System Settings ▸ General ▸ Login Items & Extensions, \
+                then relaunch. The app is still using unprivileged access.
+                """)
+            }
+            return (false, "Helper registration returned, but no enabled helper is available. The app is still using unprivileged access.")
         }
 
         // Adopt the privileged path.
@@ -292,8 +312,9 @@ final class AppModel {
         self.data = priv
         self.actions = ProcessActions(privileged: priv)
         self.helperInstalled = true
+        self.helperApprovalPending = false
         await start()
-        return (true, "The privileged helper is installed and active. Accurate per-thread CPU and cross-user detail are now available.")
+        return (true, "The privileged helper is registered and enabled. Access to individual processes and thread details still depends on macOS permissions and process protection. Stack capture, process-memory strings, and privileged sampling are not implemented.")
     }
 
     /// W2 — unregister the privileged helper via `SMAppService` (no sudo needed;
@@ -303,7 +324,7 @@ final class AppModel {
         do {
             try await PrivilegedDataProvider.uninstallHelper()
         } catch {
-            return (false, "The privileged helper could not be unregistered.")
+            return (false, "The privileged helper could not be unregistered: \(error.localizedDescription)")
         }
 
         // Revert to the always-available unprivileged path.
@@ -311,6 +332,7 @@ final class AppModel {
         self.data = libproc
         self.actions = ProcessActions(privileged: nil)
         self.helperInstalled = false
+        self.helperApprovalPending = false
         await start()
         return (true, "The privileged helper has been removed. The app is now running unprivileged.")
     }
@@ -376,7 +398,7 @@ final class AppModel {
     private static func normalizedLowerPaneColumns<C: LowerPaneColumn>(_ columns: [C], defaultColumns: [C]) -> [C] {
         var seen = Set(C.requiredColumns)
         var normalized = C.requiredColumns
-        for column in columns where seen.insert(column).inserted {
+        for column in columns where column.isSupportedOnMac && seen.insert(column).inserted {
             normalized.append(column)
         }
         return normalized.isEmpty ? defaultColumns : normalized
@@ -474,7 +496,7 @@ final class AppModel {
             )
             return
         }
-        await checkVirusTotal(displayName: record.name, path: path, signature: record.signing)
+        await checkVirusTotal(displayName: record.name, path: path, signature: record.signing, processID: record.id)
     }
 
     func checkVirusTotalForImage(name: String, path: String, signature: SignatureInfo? = nil) async {
@@ -515,7 +537,8 @@ final class AppModel {
         NSWorkspace.shared.open(url)
     }
 
-    private func checkVirusTotal(displayName: String, path: String, signature existingSignature: SignatureInfo?) async {
+    private func checkVirusTotal(displayName: String, path: String, signature existingSignature: SignatureInfo?,
+                                 processID: ProcessID? = nil) async {
         let signature: SignatureInfo
         if let existingSignature, let sha = existingSignature.sha256, !sha.isEmpty {
             signature = existingSignature
@@ -533,6 +556,23 @@ final class AppModel {
 
         do {
             if let result = try await signing.virusTotal(sha256: sha) {
+                guard !Task.isCancelled else { return }
+                if let processID {
+                    guard let current = snapshot.info(processID), current.executablePath == path,
+                          current.signing?.sha256 == nil || current.signing?.sha256 == sha else { return }
+                }
+                var updated = signatureCache[path] ?? signature
+                guard updated.sha256 == sha else { return }
+                updated.virusTotal = result
+                signatureCache[path] = updated
+                var processes = snapshot.processes
+                for (id, record) in processes where record.executablePath == path {
+                    if record.signing?.sha256 == sha || (id == processID && record.signing == nil) {
+                        processes[id]?.signing = updated
+                    }
+                }
+                snapshot = ProcessSnapshot(timestamp: snapshot.timestamp, interval: snapshot.interval,
+                    processes: processes, roots: snapshot.roots, children: snapshot.children, system: snapshot.system)
                 processActionAlert = ProcessActionAlert(
                     title: "VirusTotal Result",
                     message: virusTotalMessage(displayName: displayName, result: result)
@@ -567,6 +607,8 @@ final class AppModel {
     /// Begin (or restart) the snapshot stream at the current refresh interval.
     func start() async {
         streamTask?.cancel()
+        streamGeneration += 1
+        let generation = streamGeneration
         // R1 — honour the paused state: stop streaming entirely.
         guard !paused else {
             streamTask = nil
@@ -577,42 +619,16 @@ final class AppModel {
         let system = self.system
         streamTask = Task { @MainActor in
             for await snap in provider.snapshots(interval: interval) {
-                let enriched = self.enrichWithSignatures(self.enrichWithAutostart(self.enrichWithCommandLines(self.enrichWithOwnership(snap))))
-                self.snapshot = enriched
+                guard !Task.isCancelled, self.streamGeneration == generation else { return }
+                self.publicationGeneration += 1
+                let publication = self.publicationGeneration
                 let stats = await system.stats()
-                self.systemHistoryTimestamps.append(Date())
-                self.cpuHistory.append(stats.cpuTotalPercent)
-                let memPct = stats.memoryTotal > 0
-                    ? Double(stats.memoryUsed) / Double(stats.memoryTotal) * 100
-                    : 0
-                self.memoryHistory.append(memPct)
-
-                // W4 — record the remaining System Information series.
-                self.swapHistory.append(Double(stats.swapUsed))
-                self.diskHistory.append(Double(stats.diskBytesPerSec))
-                self.networkHistory.append(Double(stats.networkBytesPerSec))
+                guard !Task.isCancelled, self.streamGeneration == generation else { return }
+                guard self.publicationGeneration == publication else { continue }
                 let gpuPercent = await self.gpuStats.systemGPUPercent()
-                self.gpuHistory.append(gpuPercent ?? 0)
-
-                // R5 — record the top consumer for each resource this tick.
-                self.appendTopConsumers(for: snap)
-
-                // R1 — combined I/O throughput for the toolbar mini graph.
-                self.ioHistory.append(Double(stats.diskBytesPerSec) + Double(stats.networkBytesPerSec))
-
-                // Grow the per-core rings to match the current core count,
-                // then append each core's utilisation.
-                let cores = stats.perCoreCPUPercent
-                if self.perCoreHistory.count != cores.count {
-                    self.perCoreHistory = (0..<cores.count).map { index in
-                        index < self.perCoreHistory.count
-                            ? self.perCoreHistory[index]
-                            : HistoryRing<Double>(capacity: 120)
-                    }
-                }
-                for (index, value) in cores.enumerated() {
-                    self.perCoreHistory[index].append(value)
-                }
+                guard !Task.isCancelled, self.streamGeneration == generation else { return }
+                guard self.publicationGeneration == publication else { continue }
+                self.publish(snap, stats: stats, gpuPercent: gpuPercent)
 
                 if Task.isCancelled { break }
             }
@@ -620,6 +636,7 @@ final class AppModel {
     }
 
     func stop() {
+        streamGeneration += 1
         streamTask?.cancel()
         streamTask = nil
     }
@@ -637,19 +654,59 @@ final class AppModel {
     /// disturbing the running stream. Also updates the history rings so the
     /// graphs advance a step.
     func forceRefresh() async {
+        let generation = streamGeneration
+        publicationGeneration += 1
+        let publication = publicationGeneration
         let provider: any ProcessDataProviding = data
         let snap = await provider.snapshot()
-        self.snapshot = self.enrichWithSignatures(self.enrichWithAutostart(self.enrichWithCommandLines(self.enrichWithOwnership(snap))))
+        guard !Task.isCancelled, streamGeneration == generation,
+              publicationGeneration == publication else { return }
         let stats = await system.stats()
-        systemHistoryTimestamps.append(Date())
-        cpuHistory.append(stats.cpuTotalPercent)
-        let memPct = stats.memoryTotal > 0
-            ? Double(stats.memoryUsed) / Double(stats.memoryTotal) * 100
-            : 0
-        memoryHistory.append(memPct)
+        guard !Task.isCancelled, streamGeneration == generation,
+              publicationGeneration == publication else { return }
         let gpuPercent = await gpuStats.systemGPUPercent()
-        gpuHistory.append(gpuPercent ?? 0)
-        ioHistory.append(Double(stats.diskBytesPerSec) + Double(stats.networkBytesPerSec))
+        guard !Task.isCancelled, streamGeneration == generation,
+              publicationGeneration == publication else { return }
+        publish(snap, stats: stats, gpuPercent: gpuPercent)
+    }
+
+    private func publish(_ source: ProcessSnapshot, stats: SystemStats, gpuPercent: Double?) {
+        var merged = stats
+        merged.processCount = source.processes.count
+        merged.threadCount = source.processes.values.reduce(0) { $0 + $1.threadCount }
+        merged.handleCount = source.processes.values.reduce(0) { $0 + ($1.fileDescriptorCount ?? 0) }
+        merged.gpuPercent = gpuPercent
+        if gpuPercent == nil { merged.unavailableMetrics.insert(.gpu) }
+        else { merged.unavailableMetrics.remove(.gpu) }
+        let enriched = enrichWithSignatures(enrichWithAutostart(enrichWithCommandLines(enrichWithOwnership(source))))
+        snapshot = ProcessSnapshot(timestamp: enriched.timestamp, interval: enriched.interval,
+            processes: enriched.processes, roots: enriched.roots, children: enriched.children, system: merged)
+
+        func sample(_ metric: SystemStats.Metric, _ value: Double) -> Double {
+            merged.unavailableMetrics.contains(metric) ? .nan : value
+        }
+        systemHistoryTimestamps.append(Date())
+        cpuHistory.append(sample(.cpu, merged.cpuTotalPercent))
+        let memPct = merged.memoryTotal > 0 && !merged.unavailableMetrics.contains(.memory)
+            ? Double(merged.memoryUsed) / Double(merged.memoryTotal) * 100
+            : .nan
+        memoryHistory.append(memPct)
+        swapHistory.append(sample(.swap, Double(merged.swapUsed)))
+        diskHistory.append(sample(.disk, Double(merged.diskBytesPerSec)))
+        networkHistory.append(sample(.network, Double(merged.networkBytesPerSec)))
+        gpuHistory.append(gpuPercent ?? .nan)
+        ioHistory.append(merged.unavailableMetrics.isDisjoint(with: [.disk, .network])
+            ? Double(merged.diskBytesPerSec) + Double(merged.networkBytesPerSec) : .nan)
+        appendTopConsumers(for: source)
+        let cores = merged.perCoreCPUPercent
+        if perCoreHistory.count != cores.count {
+            perCoreHistory = cores.indices.map { index in
+                index < perCoreHistory.count ? perCoreHistory[index] : HistoryRing<Double>(capacity: 120)
+            }
+        }
+        for (index, value) in cores.enumerated() {
+            perCoreHistory[index].append(sample(.cpu, value))
+        }
     }
 
     // MARK: - Target-window picker
@@ -869,11 +926,6 @@ final class AppModel {
             // Already resolved → merge the cached result.
             if let cached = signatureCache[path] {
                 processes[id]?.signing = cached
-                // Fall back to the signing identity for a missing Company.
-                if (processes[id]?.companyName ?? "").isEmpty,
-                   let signerCompany = cached.signerCompany {
-                    processes[id]?.companyName = signerCompany
-                }
                 continue
             }
 
@@ -888,7 +940,10 @@ final class AppModel {
             startedThisRefresh += 1
             let signing = self.signing
             Task { @MainActor in
-                let info = await signing.signature(forPath: path)
+                var info = await signing.signature(forPath: path)
+                if let sha = info.sha256, sha == self.signatureCache[path]?.sha256, info.virusTotal == nil {
+                    info.virusTotal = self.signatureCache[path]?.virusTotal
+                }
                 self.signatureCache[path] = info
                 self.signatureInFlight.remove(path)
             }
@@ -1018,11 +1073,13 @@ final class AppModel {
             if record.cpuPercent > cpu.value {
                 cpu = TopConsumer(name: record.name, value: record.cpuPercent)
             }
-            let memBytes = Double(record.physFootprint ?? record.residentSize)
+            let memBytes = Double(record.physFootprint ?? 0)
             if memBytes > mem.value {
                 mem = TopConsumer(name: record.name, value: memBytes)
             }
-            let ioBytes = Double((record.diskBytesRead ?? 0) + (record.diskBytesWritten ?? 0))
+            let ioBytes = record.diskBytesRead.flatMap { read in
+                record.diskBytesWritten.map { Double(read) + Double($0) }
+            } ?? 0
             if ioBytes > io.value {
                 io = TopConsumer(name: record.name, value: ioBytes)
             }

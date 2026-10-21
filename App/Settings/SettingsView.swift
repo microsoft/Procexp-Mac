@@ -51,8 +51,10 @@ private struct GeneralSettingsView: View {
             }
 
             Section {
-                Toggle("Confirm before killing a process", isOn: $model.confirmBeforeKill)
+                Toggle("Confirm before force quitting a process", isOn: $model.confirmBeforeKill)
+                    .accessibilityLabel("Confirm before force quitting a process")
                 Toggle("Verify code signatures", isOn: $model.verifySignatures)
+                    .accessibilityLabel("Verify code signatures")
             }
 
             Section {
@@ -143,12 +145,12 @@ private struct ColorSettingsView: View {
     static func name(for flag: ProcessFlags) -> String {
         switch flag {
         case .ownProcess:  return "Own Processes"
-        case .service:     return "Services"
+        case .service:     return "System Daemons (inferred)"
         case .suspended:   return "Suspended"
         case .sandboxed:   return "Sandboxed"
         case .packed:      return "Packed Images"
         case .newProcess:  return "New Processes"
-        case .deadProcess: return "Deleted Processes"
+        case .deadProcess: return "Exited Processes"
         default:           return "Other"
         }
     }

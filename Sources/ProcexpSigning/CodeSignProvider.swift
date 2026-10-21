@@ -22,7 +22,7 @@ public final class CodeSignProvider: SigningProviding {
     public init() {
         // The client reads the API key from the Keychain each time it needs it,
         // so a key set later via `setAPIKey` takes effect without re-creating.
-        self.virusTotalClient = VirusTotalClient(apiKeyProvider: { Keychain.readAPIKey() })
+        self.virusTotalClient = VirusTotalClient(apiKeyProvider: { try Keychain.readAPIKey() })
     }
 
     // MARK: - API key management
@@ -70,7 +70,7 @@ public final class CodeSignProvider: SigningProviding {
         var teamID: String?
         var authority: [String] = []
         var isAdHoc = false
-        var hasPlatformIdentifier = false
+        var isPlatform: Bool?
 
         let infoFlags = SecCSFlags(
             rawValue: UInt32(kSecCSSigningInformation) | UInt32(kSecCSRequirementInformation))
@@ -100,22 +100,32 @@ public final class CodeSignProvider: SigningProviding {
                 isAdHoc = (flags & adhocBit) != 0
             }
 
-            // Presence of a platform identifier is the strongest available
-            // signal that the OS treats this as a platform binary.
-            hasPlatformIdentifier = info[kSecCodeInfoPlatformIdentifier as String] != nil
+            if status == .unsigned || (status == .signed && isAdHoc) {
+                isPlatform = false
+            } else if status == .signed {
+                isPlatform = Self.platformBinaryStatus(signingInformation: info)
+                if isPlatform == true {
+                    var appleRequirement: SecRequirement?
+                    let requirementStatus = SecRequirementCreateWithString(
+                        "anchor apple" as CFString, [], &appleRequirement)
+                    if requirementStatus == errSecSuccess, let appleRequirement {
+                        let anchorStatus = SecStaticCodeCheckValidity(code, checkFlags, appleRequirement)
+                        switch anchorStatus {
+                        case errSecSuccess: isPlatform = true
+                        case errSecCSReqFailed: isPlatform = false
+                        default: isPlatform = nil
+                        }
+                    } else {
+                        isPlatform = nil
+                    }
+                }
+            }
         }
-
-        let isPlatform = hasPlatformIdentifier || Self.isSystemPath(path)
-
-        // 3) Notarization (approximated — see note below).
-        let isNotarized = Self.approximateNotarized(
-            status: status, authority: authority, isPlatform: isPlatform, isAdHoc: isAdHoc)
 
         return SignatureInfo(
             status: status,
             teamID: teamID,
             authority: authority,
-            isNotarized: isNotarized,
             isPlatformBinary: isPlatform,
             isAdHoc: isAdHoc,
             sha256: sha,
@@ -129,6 +139,12 @@ public final class CodeSignProvider: SigningProviding {
     }
 
     // MARK: - Helpers
+
+    private static func platformBinaryStatus(signingInformation info: NSDictionary) -> Bool? {
+        guard let value = info[kSecCodeInfoPlatformIdentifier as String] else { return false }
+        guard let number = value as? NSNumber else { return nil }
+        return number.uint32Value != 0
+    }
 
     /// Streams the file in 1 MiB chunks so large binaries don't get fully
     /// resident in memory. Returns a lowercase hex digest, or `nil` on error.
@@ -152,12 +168,6 @@ public final class CodeSignProvider: SigningProviding {
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
-    /// Path-prefix heuristic for OS-shipped binaries.
-    static func isSystemPath(_ path: String) -> Bool {
-        let prefixes = ["/System/", "/usr/", "/bin/", "/sbin/"]
-        return prefixes.contains { path.hasPrefix($0) }
-    }
-
     private static func securityMessage(for status: OSStatus) -> String {
         if let message = SecCopyErrorMessageString(status, nil) as String? {
             return message
@@ -165,28 +175,4 @@ public final class CodeSignProvider: SigningProviding {
         return "Security.framework status \(status)"
     }
 
-    /// Best-effort notarization signal.
-    ///
-    /// NOTE (approximation): We deliberately do **not** call the Gatekeeper
-    /// assessment API (`SecAssessmentCreate` / `SecAssessmentCopyResult`). That
-    /// API performs a full, potentially slow, network-touching security
-    /// assessment and its `Unmanaged<CFError>` bridging is awkward and
-    /// entitlement-sensitive. Instead we approximate:
-    ///
-    ///     isNotarized = signed && has a "Developer ID Application" authority
-    ///                          && not a platform binary && not ad-hoc
-    ///
-    /// This correctly flags the common case (a Developer-ID-signed third-party
-    /// app, which in practice must be notarized to run) while treating Apple
-    /// platform binaries — which are not "notarized" in the Developer ID sense —
-    /// as `false`. It can theoretically report a false positive for a
-    /// Developer-ID-signed but *un*-notarized binary; a precise check would
-    /// require the SecAssessment API noted above.
-    static func approximateNotarized(status: SigningStatus,
-                                     authority: [String],
-                                     isPlatform: Bool,
-                                     isAdHoc: Bool) -> Bool {
-        guard status == .signed, !isPlatform, !isAdHoc else { return false }
-        return authority.contains { $0.contains("Developer ID Application") }
-    }
 }

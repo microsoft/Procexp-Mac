@@ -8,26 +8,30 @@
 #   2. embeds the root helper + launchd plist at the production location,
 #   3. signs everything inside-out with a stable (non-ad-hoc) identity,
 #   4. installs to /Applications (SMAppService ties the helper registration to
-#      the app's signature + this location, so reinstalling the same-identity
-#      build keeps the helper registered across rebuilds), and
+#      the app's signature + this location), and
 #   5. launches it.
 #
-# First run: if the default self-signed identity does not exist yet, it is
-# created automatically (via Scripts/dev_make_signing_id.sh). Then use the app's
+# An accepted signing identity must already exist; this script never creates
+# an identity, unlocks a keychain, changes trust or updates its search list.
+# Then use the app's
 # "Install Privileged Helper…" menu once and approve it in System Settings ▸
 # General ▸ Login Items & Extensions. After that, every subsequent run of this
-# script rebuilds and relaunches the signed app with the helper already enabled.
+# script checks prerequisites again; registration is not inferred from signing.
 #
 # NOTE ON HELPER CODE CHANGES: the running root daemon keeps executing the
 # already-loaded binary until it is restarted. Changes to the APP are picked up
 # on relaunch, but changes to the HELPER's own code require restarting the
-# daemon — pass RESTART_HELPER=1 (prompts for sudo) to do that.
+# daemon — separately approve RESTART_HELPER=1 (noninteractive sudo) to do that.
 #
 # Env:
 #   CONFIGURATION               Debug or Release (defaults by signing flavor)
 #   DEV_SIGN_IDENTITY           signing identity (default: "ProcexpMac Dev")
-#   DEV_SIGN_KEYCHAIN           keychain holding it (default: procexp-dev.keychain-db)
-#   DEV_SIGN_KEYCHAIN_PASSWORD  its password (default: "procexp-dev")
+#   DEV_SIGN_KEYCHAIN           optional dedicated keychain for codesign
+#   PROCEXP_LOCAL_FLAVOR        development (default) or explicitly approved official
+#   PROCEXP_HELPER_INSTALL_APPROVED   required (value 1)
+#   PROCEXP_HELPER_REPLACE_APPROVED   required for an existing target app (value 1)
+#   PROCEXP_HELPER_OFFICIAL_APPROVED  required for the official tuple (value 1)
+#   PROCEXP_HELPER_RESTART_APPROVED   required with RESTART_HELPER=1 (value 1)
 #   INSTALL_DIR                 install destination (default: /Applications)
 #   RESTART_HELPER              1 to restart the root daemon after install (sudo)
 #
@@ -39,9 +43,7 @@ cd "$REPO_ROOT"
 CONFIGURATION="${CONFIGURATION:-}"
 IDENTITY="${DEV_SIGN_IDENTITY:-ProcexpMac Dev}"
 INSTALL_DIR="${INSTALL_DIR:-/Applications}"
-DEFAULT_KEYCHAIN="$HOME/Library/Keychains/procexp-dev.keychain-db"
-SIGN_KEYCHAIN="${DEV_SIGN_KEYCHAIN:-$DEFAULT_KEYCHAIN}"
-SIGN_KEYCHAIN_PASSWORD="${DEV_SIGN_KEYCHAIN_PASSWORD:-procexp-dev}"
+SIGN_KEYCHAIN="${DEV_SIGN_KEYCHAIN:-}"
 RESTART_HELPER="${RESTART_HELPER:-0}"
 BUILD_DIR="$REPO_ROOT/build"
 DERIVED="$BUILD_DIR/DerivedData"
@@ -49,52 +51,19 @@ HELPER_ENTITLEMENTS="$REPO_ROOT/Helper/ProcexpHelper.entitlements"
 
 fail() { echo "ERROR: $*" >&2; exit 1; }
 
-# ---------------------------------------------------------------------------
-# Auto-create the default self-signed identity on first use.
-# ---------------------------------------------------------------------------
-if ! security find-identity -p codesigning 2>/dev/null | grep -qF "$IDENTITY"; then
-    if [[ "$IDENTITY" == "ProcexpMac Dev" ]]; then
-        echo "==> Signing identity \"$IDENTITY\" not found — creating it…"
-        DEV_SIGN_KEYCHAIN="$SIGN_KEYCHAIN" \
-        DEV_SIGN_KEYCHAIN_PASSWORD="$SIGN_KEYCHAIN_PASSWORD" \
-        bash "$REPO_ROOT/Scripts/dev_make_signing_id.sh" "$IDENTITY"
-    fi
+move_exact() {
+    # Unlike mv, rename cannot silently nest a bundle inside an occupied destination.
+    python3 -c 'import os, sys; os.rename(sys.argv[1], sys.argv[2])' "$1" "$2"
+}
+
+python3 "$REPO_ROOT/Scripts/helper_lifecycle_guard.py" install
+
+IS_OFFICIAL=0
+if [[ "${PROCEXP_LOCAL_FLAVOR:-development}" == "official" ]]; then
+    IS_OFFICIAL=1
 fi
 
-# ---------------------------------------------------------------------------
-# Unlock the dedicated signing keychain so codesign can use the private key
-# without an interactive prompt.
-# ---------------------------------------------------------------------------
-if [[ -n "$SIGN_KEYCHAIN" && -f "$SIGN_KEYCHAIN" ]]; then
-    if [[ -n "$SIGN_KEYCHAIN_PASSWORD" ]]; then
-        security unlock-keychain -p "$SIGN_KEYCHAIN_PASSWORD" "$SIGN_KEYCHAIN"
-    fi
-    # Make sure it's on the search list so find-identity/codesign see it.
-    EXISTING="$(security list-keychains -d user | sed -e 's/^[[:space:]]*//' -e 's/"//g' | tr '\n' ' ')"
-    case " $EXISTING " in
-        *" $SIGN_KEYCHAIN "*) : ;;
-        # shellcheck disable=SC2086
-        *) security list-keychains -d user -s "$SIGN_KEYCHAIN" $EXISTING ;;
-    esac
-fi
-
-# ---------------------------------------------------------------------------
-# Verify the identity exists and classify it.
-# ---------------------------------------------------------------------------
-# NOTE: use the unfiltered list (not `-v`), because a self-signed identity is
-# reported CSSMERR_TP_NOT_TRUSTED and excluded from the "valid only" list even
-# though codesign can sign with it perfectly well.
-security find-identity -p codesigning | grep -qF "$IDENTITY" \
-    || fail "signing identity not found in keychain: \"$IDENTITY\"
-       Available:
-$(security find-identity -p codesigning)"
-
-IS_DEVELOPER_ID=0
-if [[ "$IDENTITY" == *"Developer ID"* ]]; then
-    IS_DEVELOPER_ID=1
-fi
-
-if [[ "$IS_DEVELOPER_ID" -eq 1 ]]; then
+if [[ "$IS_OFFICIAL" -eq 1 ]]; then
     CONFIGURATION="${CONFIGURATION:-Release}"
     APP_BUNDLE_ID="com.sysinternals.procexpmac"
     APP_DISPLAY_NAME="Process Explorer"
@@ -104,6 +73,7 @@ if [[ "$IS_DEVELOPER_ID" -eq 1 ]]; then
     HELPER_FLAVOR="official"
     HELPER_CONFIGURATION="release"
 else
+    DERIVED="$BUILD_DIR/DerivedData-Development"
     CONFIGURATION="${CONFIGURATION:-Debug}"
     APP_BUNDLE_ID="com.sysinternals.procexpmac.dev"
     APP_DISPLAY_NAME="Process Explorer (Dev)"
@@ -115,41 +85,54 @@ else
 fi
 APP_SRC="$DERIVED/Build/Products/$CONFIGURATION/$APP_WRAPPER_NAME"
 APP_DEST="$INSTALL_DIR/$APP_INSTALL_NAME"
+case "$CONFIGURATION" in
+    Debug|Release) ;;
+    *) fail "CONFIGURATION must be Debug or Release" ;;
+esac
+
+SIGNING_READINESS="$(DEV_SIGN_IDENTITY="$IDENTITY" DEV_SIGN_KEYCHAIN="$SIGN_KEYCHAIN" \
+    python3 "$REPO_ROOT/Scripts/helper_lifecycle_guard.py" signing)"
+IDENTITY="$(python3 -c 'import json, sys; print(json.loads(sys.argv[1])["certificateSHA1"])' \
+    "$SIGNING_READINESS")"
 
 echo "==> Using signing identity: $IDENTITY"
-if [[ "$IS_DEVELOPER_ID" -eq 0 ]]; then
+if [[ "$IS_OFFICIAL" -eq 0 ]]; then
     cat <<'NOTE'
-    NOTE: this is a self-signed identity. SMAppService will register the daemon
-    only after you approve it once in System Settings ▸ General ▸ Login Items &
-    Extensions (use the app's "Install Privileged Helper…" menu the first time).
-    After approval the registration persists across rebuilds signed with the
-    same identity.
+    NOTE: this is the isolated development tuple. Signing a bundle does not
+    prove macOS will accept its helper registration. The user must approve
+    the actual SMAppService flow; denied registration is not qualification.
 NOTE
 fi
 
 # ---------------------------------------------------------------------------
 # 1. Build the app.
 # ---------------------------------------------------------------------------
-echo "==> Regenerating Xcode project (xcodegen)…"
-xcodegen generate >/dev/null
-
 echo "==> Building $CONFIGURATION app…"
-xcodebuild -project ProcexpMac.xcodeproj -scheme ProcexpMac \
-    -configuration "$CONFIGURATION" -derivedDataPath "$DERIVED" \
-    "PRODUCT_BUNDLE_IDENTIFIER=$APP_BUNDLE_ID" \
-    "INFOPLIST_KEY_CFBundleDisplayName=$APP_DISPLAY_NAME" \
-    "WRAPPER_NAME=$APP_WRAPPER_NAME" \
-    build >/dev/null
+if [[ "$CONFIGURATION" == "Release" ]]; then
+    PROCEXP_BUILD_FLAVOR="$HELPER_FLAVOR" PACKAGE_DMG=0 \
+        bash "$REPO_ROOT/Scripts/build_release.sh"
+else
+    echo "==> Regenerating Xcode project (xcodegen)…"
+    xcodegen generate >/dev/null
+    xcodebuild -project ProcexpMac.xcodeproj -scheme ProcexpMac \
+        -configuration "$CONFIGURATION" -derivedDataPath "$DERIVED" \
+        "PRODUCT_BUNDLE_IDENTIFIER=$APP_BUNDLE_ID" \
+        "INFOPLIST_KEY_CFBundleDisplayName=$APP_DISPLAY_NAME" \
+        "WRAPPER_NAME=$APP_WRAPPER_NAME" \
+        build >/dev/null
+fi
 [[ -d "$APP_SRC" ]] || fail "expected app not found at $APP_SRC"
 
 # ---------------------------------------------------------------------------
 # 2. Embed the helper + plist at the production location.
 # ---------------------------------------------------------------------------
-PROCEXP_HELPER_FLAVOR="$HELPER_FLAVOR" \
-PROCEXP_APP_BUNDLE_ID="$APP_BUNDLE_ID" \
-PROCEXP_HELPER_NAME="$HELPER_NAME" \
-HELPER_CONFIGURATION="$HELPER_CONFIGURATION" \
-    bash "$REPO_ROOT/Scripts/embed_helper.sh" "$APP_SRC"
+if [[ "$CONFIGURATION" == "Debug" ]]; then
+    PROCEXP_HELPER_FLAVOR="$HELPER_FLAVOR" \
+    PROCEXP_APP_BUNDLE_ID="$APP_BUNDLE_ID" \
+    PROCEXP_HELPER_NAME="$HELPER_NAME" \
+    HELPER_CONFIGURATION="$HELPER_CONFIGURATION" \
+        bash "$REPO_ROOT/Scripts/embed_helper.sh" "$APP_SRC"
+fi
 HELPER_PATH="$APP_SRC/Contents/Library/LaunchDaemons/$HELPER_NAME"
 
 # ---------------------------------------------------------------------------
@@ -164,6 +147,9 @@ HELPER_PATH="$APP_SRC/Contents/Library/LaunchDaemons/$HELPER_NAME"
 # Runtime. Developer ID builds keep validation on (their Team ID matches).
 # ---------------------------------------------------------------------------
 SIGN=(codesign --force --options runtime --timestamp=none --sign "$IDENTITY")
+if [[ -n "$SIGN_KEYCHAIN" ]]; then
+    SIGN+=(--keychain "$SIGN_KEYCHAIN")
+fi
 
 echo "==> Signing nested frameworks/dylibs…"
 if [[ -d "$APP_SRC/Contents/Frameworks" ]]; then
@@ -187,13 +173,14 @@ echo "==> Signing embedded helper (with debugger entitlement)…"
     --entitlements "$HELPER_ENTITLEMENTS" "$HELPER_PATH"
 
 echo "==> Signing app bundle…"
-if [[ "$IS_DEVELOPER_ID" -eq 1 ]]; then
+if [[ "$IS_OFFICIAL" -eq 1 ]]; then
     # Developer ID: entitlement-free app with library validation enabled.
     "${SIGN[@]}" "$APP_SRC"
 else
     # Self-signed: disable library validation so the Debug side dylibs load, and
     # omit the restricted com.apple.developer.* entitlement (which blocks launch).
-    DEV_ENT="$(mktemp -t procexp-dev-ent).plist"
+    DEV_ENT="$(mktemp -t procexp-dev-ent)"
+    trap 'rm -f "$DEV_ENT"' EXIT
     cat > "$DEV_ENT" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -206,11 +193,16 @@ else
 PLIST
     "${SIGN[@]}" --entitlements "$DEV_ENT" "$APP_SRC"
     rm -f "$DEV_ENT"
+    trap - EXIT
 fi
 
 echo "==> Verifying signature…"
-codesign --verify --strict --verbose=2 "$APP_SRC" || \
-    echo "(verification warnings above are expected for self-signed builds.)"
+codesign --verify --deep --strict --verbose=2 "$APP_SRC"
+if [[ "$IS_OFFICIAL" -eq 1 ]]; then
+    APPLE_DEVELOPER_ID='=anchor apple generic and certificate leaf[field.1.2.840.113635.100.6.1.13] exists'
+    codesign --verify --strict -R "$APPLE_DEVELOPER_ID" "$APP_SRC"
+    codesign --verify --strict -R "$APPLE_DEVELOPER_ID" "$HELPER_PATH"
+fi
 
 ACTUAL_APP_BUNDLE_ID="$(/usr/libexec/PlistBuddy -c \
     'Print :CFBundleIdentifier' "$APP_SRC/Contents/Info.plist")"
@@ -225,33 +217,42 @@ ACTUAL_HELPER_ID="$(codesign -d --verbose=4 "$HELPER_PATH" 2>&1 \
 # 4. Install to a stable location and launch.
 # ---------------------------------------------------------------------------
 echo "==> Installing to $APP_DEST"
-# Best-effort: quit any running copy, then swap in the new build.
-APP_EXECUTABLE_REGEX="$(printf '%s' "$APP_DEST/Contents/MacOS/ProcexpMac" \
-    | sed 's/[][\\.^$*+?(){}|]/\\&/g')"
-pkill -f "$APP_EXECUTABLE_REGEX" 2>/dev/null || true
-rm -rf "$APP_DEST"
-cp -R "$APP_SRC" "$APP_DEST"
-xattr -dr com.apple.quarantine "$APP_DEST" 2>/dev/null || true
+python3 "$REPO_ROOT/Scripts/helper_lifecycle_guard.py" install
+STAGE="$(mktemp -d "$INSTALL_DIR/.procexp-approved-install.XXXXXX")"
+trap 'rm -rf "$STAGE"' EXIT
+ditto "$APP_SRC" "$STAGE/$APP_INSTALL_NAME"
+codesign --verify --deep --strict "$STAGE/$APP_INSTALL_NAME"
+python3 "$REPO_ROOT/Scripts/helper_lifecycle_guard.py" install
+BACKUP=""
+if [[ -d "$APP_DEST" ]]; then
+    BACKUP="$APP_DEST.backup.$(uuidgen)"
+    [[ ! -e "$BACKUP" && ! -L "$BACKUP" ]] || fail "backup destination already exists"
+    move_exact "$APP_DEST" "$BACKUP"
+    echo "==> Preserved previous app at $BACKUP"
+fi
+if ! move_exact "$STAGE/$APP_INSTALL_NAME" "$APP_DEST"; then
+    if [[ -n "$BACKUP" ]]; then
+        [[ ! -e "$APP_DEST" && ! -L "$APP_DEST" ]] || fail \
+            "install destination changed; previous app preserved at $BACKUP"
+        move_exact "$BACKUP" "$APP_DEST" || fail "could not restore previous app; preserved at $BACKUP"
+        fail "install swap failed; previous app restored"
+    fi
+    fail "install swap failed; no previous app changed"
+fi
 
 # ---------------------------------------------------------------------------
 # 5. Optionally restart the root daemon so it loads the freshly built helper
 #    binary (needed only when the HELPER's own code changed).
 # ---------------------------------------------------------------------------
 if [[ "$RESTART_HELPER" == "1" ]]; then
-    if launchctl print "system/$HELPER_NAME" >/dev/null 2>&1; then
-        echo "==> Restarting the root helper daemon (sudo)…"
-        sudo launchctl kickstart -k "system/$HELPER_NAME" || \
-            echo "(could not restart the daemon; it may reload on next connect.)"
-    fi
+    echo "==> Restarting the separately approved root helper daemon…"
+    sudo -n launchctl kickstart -k "system/$HELPER_NAME"
 fi
 
 echo "==> Launching $APP_DEST"
 open -n "$APP_DEST"
 
-HELPER_STATE="not registered"
-if launchctl print "system/$HELPER_NAME" >/dev/null 2>&1; then
-    HELPER_STATE="registered (elevated path available)"
-fi
+HELPER_STATE="$(python3 "$REPO_ROOT/Scripts/helper_lifecycle_guard.py" status)"
 
 cat <<EOF
 
@@ -266,12 +267,14 @@ First-time only: choose "Install Privileged Helper…" in the app, then approve 
 in System Settings ▸ General ▸ Login Items & Extensions.
 
 If you changed the HELPER's code, reload the daemon with:
-  RESTART_HELPER=1 bash Scripts/dev_install_helper.sh
+  PROCEXP_HELPER_INSTALL_APPROVED=1 PROCEXP_HELPER_REPLACE_APPROVED=1 \\
+  PROCEXP_HELPER_RESTART_APPROVED=1 RESTART_HELPER=1 bash Scripts/dev_install_helper.sh
 
 Inspect daemon status:
-  launchctl print system/$HELPER_NAME 2>/dev/null || echo "not registered"
+  PROCEXP_LOCAL_FLAVOR=$HELPER_FLAVOR python3 Scripts/helper_lifecycle_guard.py status
 
 Clean up:
+    Use the app's "Uninstall Privileged Helper…" menu and quit it first, then:
+    PROCEXP_HELPER_REMOVE_APPROVED=1 PROCEXP_HELPER_UNREGISTERED=1 \\
     PROCEXP_LOCAL_FLAVOR=$HELPER_FLAVOR bash Scripts/dev_uninstall_helper.sh
 EOF
-

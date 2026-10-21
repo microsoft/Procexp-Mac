@@ -78,11 +78,12 @@ public final class GPUStatsProvider {
         for key in keys {
             guard let raw = perf[key] as? NSNumber else { continue }
             var value = raw.doubleValue
+            guard value.isFinite else { continue }
             // Some drivers report core utilization scaled by 10,000,000
             // (i.e. 0...10_000_000). Normalize anything obviously out of the
             // percentage range back down to 0...100.
             if key == "GPU Core Utilization", value > 100 {
-                value /= 10_000_00.0 * 10.0   // 10_000_000 -> percent
+                value /= 100_000.0
             }
             if value >= 0 {
                 return min(value, 100)

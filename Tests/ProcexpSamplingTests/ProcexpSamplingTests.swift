@@ -32,10 +32,10 @@ struct ProcexpSamplingTests {
 
         #expect(!threads.isEmpty)
         #expect(threads.contains { !$0.state.isEmpty && $0.state != "unknown" })
-        #expect(threads.contains { $0.basePriority > 0 })
-        #expect(threads.contains { $0.currentPriority > 0 })
+        #expect(threads.contains { ($0.basePriority ?? 0) > 0 })
+        #expect(threads.contains { ($0.currentPriority ?? 0) > 0 })
         #expect(threads.allSatisfy { $0.cpuTime == $0.userTime + $0.kernelTime })
-        #expect(threads.allSatisfy { $0.sleepTimeSeconds >= 0 })
+        #expect(threads.allSatisfy { ($0.sleepTimeSeconds ?? -1) >= 0 })
         #expect(threads.allSatisfy { $0.dispatchQueueAddress == nil })
     }
 

@@ -41,6 +41,7 @@ enum ModuleMetadata {
         var description: String
         var company: String
         var version: String
+        var companySource: String = ""
     }
 
     private static let cache = NSCache<NSString, Box>()
@@ -65,7 +66,9 @@ enum ModuleMetadata {
         guard let info = infoDictionary(forPath: path) else {
             // No enclosing bundle (e.g. a bare /usr/lib dylib). Still try to
             // attribute a company for well-known system paths.
-            return Meta(description: "", company: systemCompany(forPath: path), version: "")
+            let company = systemCompany(forPath: path)
+            return Meta(description: "", company: company, version: "",
+                        companySource: company.isEmpty ? "" : "System file location: \(path)")
         }
 
         let description =
@@ -80,7 +83,12 @@ enum ModuleMetadata {
 
         let company = companyName(info: info, path: path)
 
-        return Meta(description: description, company: company, version: version)
+        let identifier = info["CFBundleIdentifier"] as? String ?? ""
+        let source = identifier.split(separator: ".").count >= 2
+            ? "Bundle identifier: \(identifier)"
+            : "System file location: \(path)"
+        return Meta(description: description, company: company, version: version,
+                    companySource: company.isEmpty ? "" : source)
     }
 
     /// Reads the `Info.plist` of `path` itself (if it is a bundle) or of the
@@ -176,7 +184,7 @@ struct ModuleDetailView: View {
                     .textSelection(.enabled)
                 ScrollingValue(text: id.path, font: .callout)
                     .foregroundStyle(.secondary)
-                Text("Loaded by \(id.processName) (PID \(id.pid))")
+                Text("Mapped by \(id.processName) (PID \(id.pid))")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -190,7 +198,8 @@ struct ModuleDetailView: View {
         VStack(alignment: .leading, spacing: 6) {
             sectionTitle("Image")
             detail("Description", meta.description)
-            detail("Company", meta.company)
+            detail("Organization (inferred)", meta.company)
+                .help("\(meta.companySource). This inference is not a verified publisher.")
             detail("Version", meta.version)
             detail("Mapped Base", hex(id.loadAddress))
             detail("Size", ByteFormat.bytes(id.size))
@@ -223,8 +232,8 @@ struct ModuleDetailView: View {
                 if !signature.authority.isEmpty {
                     detail("Authority", signature.authority.joined(separator: " › "), scroll: true)
                 }
-                detail("Notarized", signature.isNotarized ? "Yes" : "No")
-                if signature.isPlatformBinary { detail("Platform binary", "Yes") }
+                detail("Notarized", signature.notarizationDescription)
+                detail("Platform binary", signature.platformBinaryDescription)
                 if signature.isAdHoc { detail("Ad-hoc", "Yes") }
                 if let sha = signature.sha256, !sha.isEmpty {
                     detail("SHA-256", sha, scroll: true)
@@ -290,6 +299,7 @@ struct ModuleDetailView: View {
                 Text(label)
                     .font(.callout)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                     .frame(width: 120, alignment: .trailing)
                 if scroll {
                     ScrollingValue(text: value, font: .callout)

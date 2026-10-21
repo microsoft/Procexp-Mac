@@ -92,8 +92,8 @@ private enum ColumnSelectionTab: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .process: return "Process"
-        case .dlls: return "DLLs"
-        case .handles: return "Handles"
+        case .dlls: return "Mapped Images / Files"
+        case .handles: return "File Descriptors"
         case .threads: return "Threads"
         }
     }
@@ -304,7 +304,7 @@ struct LowerPaneColumnSelectionEditor<C: LowerPaneColumn>: View {
 
     var body: some View {
         List(selection: $selectedRows) {
-            ForEach(Array(C.allCases), id: \.self) { column in
+            ForEach(Array(C.allCases).filter(\.isSupportedOnMac), id: \.self) { column in
                 Toggle(isOn: binding(for: column)) {
                     Text(column.title)
                         .foregroundStyle(selectedRows.contains(column.rawValue) ? Color.white : Color.primary)
@@ -339,7 +339,7 @@ struct LowerPaneColumnSelectionEditor<C: LowerPaneColumn>: View {
         for column in C.requiredColumns where seen.insert(column).inserted {
             result.append(column)
         }
-        for column in columns where seen.insert(column).inserted {
+        for column in columns where column.isSupportedOnMac && seen.insert(column).inserted {
             result.append(column)
         }
         return result.isEmpty ? C.requiredColumns : result

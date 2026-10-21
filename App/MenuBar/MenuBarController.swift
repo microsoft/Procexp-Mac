@@ -19,6 +19,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private weak var model: AppModel?
     private var statusItem: NSStatusItem?
     private let menu = NSMenu()
+    var onShowMainWindow: (() -> Void)?
 
     // Dynamic menu header items, rebuilt each time the menu opens.
     private let cpuHeaderItem = NSMenuItem(title: "CPU: —", action: nil, keyEquivalent: "")
@@ -114,6 +115,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
         NSColor.systemGreen.setFill()
         for (i, value) in samples.enumerated() {
+            guard value.isFinite else { continue }
             let clamped = min(max(value, 0), 100) / 100
             let barHeight = CGFloat(clamped) * plot.height
             let rect = NSRect(
@@ -172,7 +174,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) {
         guard let model else { return }
         let currentCPU = model.cpuHistory.latest ?? model.snapshot.system.cpuTotalPercent
-        cpuHeaderItem.title = String(format: "CPU: %.1f%%", currentCPU)
+        cpuHeaderItem.title = currentCPU.isFinite ? String(format: "CPU: %.1f%%", currentCPU) : "CPU: Unavailable"
 
         if let busiest = busiestProcess(in: model) {
             topProcessItem.title = String(format: "Busiest: %@ (%.1f%%)", busiest.name, busiest.cpuPercent)
@@ -190,13 +192,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     @objc private func showMainWindow() {
         NSApp.activate(ignoringOtherApps: true)
-        // Bring the main SwiftUI window forward.
-        if let window = NSApp.windows.first(where: { $0.title == "Sysinternals Process Explorer" }) {
-            window.makeKeyAndOrderFront(nil)
-        } else {
-            // Window was fully closed — ask AppKit to reopen it.
-            NSApp.sendAction(#selector(NSApplication.arrangeInFront(_:)), to: nil, from: nil)
-        }
+        onShowMainWindow?()
     }
 
     @objc private func toggleMenuBarGraph() {
@@ -215,7 +211,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     private func tooltip(cpu: Double, busiest: ProcessRecord?) -> String {
-        var text = String(format: "CPU: %.1f%%", cpu)
+        var text = cpu.isFinite ? String(format: "CPU: %.1f%%", cpu) : "CPU: Unavailable"
         if let busiest {
             text += String(format: " — busiest: %@ (%.1f%%)", busiest.name, busiest.cpuPercent)
         }

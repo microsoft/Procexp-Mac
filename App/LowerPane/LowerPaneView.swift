@@ -32,8 +32,8 @@ enum LowerPaneMode: String, CaseIterable, Identifiable, Sendable {
     /// Short segmented-control label.
     var title: String {
         switch self {
-        case .modules: return "DLLs"
-        case .handles: return "Handles"
+        case .modules: return "Mapped Images / Files"
+        case .handles: return "File Descriptors"
         case .threads: return "Threads"
         }
     }
@@ -41,7 +41,7 @@ enum LowerPaneMode: String, CaseIterable, Identifiable, Sendable {
     /// Used in the empty-state sentence.
     var pluralNoun: String {
         switch self {
-        case .modules: return "mapped images"
+        case .modules: return "mapped images or files"
         case .handles: return "open file descriptors"
         case .threads: return "threads"
         }
@@ -62,11 +62,7 @@ struct ModuleRow: Identifiable, Hashable, Sendable {
     var name: String { module.name }
     var path: String { module.path }
     var signer: String { (signature ?? module.signing)?.signerDescription ?? "" }
-    /// Company from bundle metadata, falling back to the signing identity.
-    var companyDisplay: String {
-        if !company.isEmpty { return company }
-        return (signature ?? module.signing)?.signerCompany ?? ""
-    }
+    var companyDisplay: String { company }
     var loadAddress: UInt64 { module.loadAddress }
     var size: UInt64 { module.size }
 }
@@ -149,8 +145,8 @@ struct LowerPaneView: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .frame(width: 225)
-            .help("Show mapped images (⌘D), open handles / file descriptors (⌘H), or threads (⌘Y)")
+            .frame(width: 380)
+            .help("Show mapped images / files (⌘D), file descriptors (⇧⌘H), or threads (⌘Y)")
 
             Text(countLabel)
                 .font(.caption)
@@ -169,9 +165,15 @@ struct LowerPaneView: View {
 
     private var countLabel: String {
         switch model.lowerPaneMode {
-        case .modules: return "\(filteredModules.count) images"
-        case .handles: return "\(filteredDescriptors.count) handles"
-        case .threads: return "\(filteredThreads.count) threads"
+        case .modules:
+            let count = filteredModules.count
+            return "\(count) mapped \(count == 1 ? "file" : "files")"
+        case .handles:
+            let count = filteredDescriptors.count
+            return "\(count) file \(count == 1 ? "descriptor" : "descriptors")"
+        case .threads:
+            let count = filteredThreads.count
+            return "\(count) \(count == 1 ? "thread" : "threads")"
         }
     }
 
@@ -352,8 +354,9 @@ struct LowerPaneView: View {
         } else {
             base = threads.filter {
                 String($0.id).contains(filterText)
+                    || $0.identifierDescription.localizedCaseInsensitiveContains(filterText)
                     || $0.state.localizedCaseInsensitiveContains(filterText)
-                    || String($0.basePriority).contains(filterText)
+                    || $0.basePriority.map { String($0).contains(filterText) } == true
             }
         }
         return base.sorted(using: threadSort)
@@ -600,7 +603,7 @@ struct LowerPaneView: View {
         guard let record else {
             return providerHasCrossUserVisibility
                 ? "The process may have exited before details could be enumerated."
-                : "macOS may hide \(resource) from the unprivileged sampler; the privileged helper can provide broader visibility."
+                : "macOS may restrict \(resource). A helper can request broader access, but protected processes may remain inaccessible."
         }
 
         let otherUser = !record.flags.contains(.ownProcess)
@@ -609,7 +612,7 @@ struct LowerPaneView: View {
             || record.flags.contains(.service)
 
         if !providerHasCrossUserVisibility && (otherUser || protected) {
-            return "macOS may hide \(resource) for processes owned by another user or protected by the system without the privileged helper."
+            return "macOS may restrict \(resource) for other-user or protected processes. Enabling the helper does not guarantee access."
         }
         if providerHasCrossUserVisibility && protected {
             return "macOS may still hide \(resource) for platform-protected system processes."
@@ -621,26 +624,10 @@ struct LowerPaneView: View {
         guard !threads.isEmpty else {
             return "No threads were returned for this process."
         }
-        let stubCount = threads.filter(Self.hasStubThreadDetail).count
-        if stubCount == threads.count {
-            return "Only thread identifiers are available. macOS may require the privileged helper for richer per-thread data."
-        }
-        if stubCount > 0 {
-            return "Some thread details are unavailable for this process; macOS may require the privileged helper for richer per-thread data."
+        if threads.contains(where: { $0.currentPriority == nil || $0.basePriority == nil }) {
+            return "Some thread scheduling details are unavailable. Unavailable values are not measured zeroes."
         }
         return nil
-    }
-
-    private nonisolated static func hasStubThreadDetail(_ thread: ThreadInfo) -> Bool {
-        let normalizedState = thread.state.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        let missingState = normalizedState.isEmpty || normalizedState == "unknown"
-        let missingStart = (thread.startAddress ?? 0) == 0 && (thread.startSymbol?.isEmpty ?? true)
-        return thread.cpuPercent == 0
-            && thread.cpuTime == 0
-            && missingState
-            && missingStart
-            && thread.currentPriority == 0
-            && thread.basePriority == 0
     }
 
     private nonisolated static func hexString(_ value: UInt64?) -> String {
@@ -1415,7 +1402,7 @@ private struct ThreadRowsTable: NSViewRepresentable {
             let start = tableView.selectedRow >= 0 ? tableView.selectedRow : -1
             for offset in 1...rows.count {
                 let index = (start + offset) % rows.count
-                if searchableText(for: rows[index]).lowercased().hasPrefix(prefix) {
+                if searchableFields(for: rows[index]).contains(where: { $0.lowercased().hasPrefix(prefix) }) {
                     tableView.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
                     tableView.scrollRowToVisible(index)
                     selection.wrappedValue = rows[index].id
@@ -1454,17 +1441,17 @@ private struct ThreadRowsTable: NSViewRepresentable {
 
         private func text(for id: String, row: ThreadInfo) -> String {
             switch id {
-            case "tid": return String(row.id)
+            case "tid": return row.identifierDescription
             case "name": return row.name
             case "cpu": return String(format: "%.1f%%", row.cpuPercent)
             case "cpuTime": return formatCPUTime(row.cpuTime)
             case "state": return row.state
-            case "currentPriority": return row.currentPriority == 0 ? "" : String(row.currentPriority)
-            case "basePriority": return row.basePriority == 0 ? "" : String(row.basePriority)
-            case "maxPriority": return row.maxPriority == 0 ? "" : String(row.maxPriority)
-            case "policy": return policyText(row.schedulerPolicy)
-            case "sleepTime": return row.sleepTimeSeconds > 0 ? "\(row.sleepTimeSeconds)s" : ""
-            case "flags": return ThreadFlagFormatter.flags(row.flags)
+            case "currentPriority": return row.currentPriority.map(String.init) ?? "—"
+            case "basePriority": return row.basePriority.map(String.init) ?? "—"
+            case "maxPriority": return row.maxPriority.map(String.init) ?? "—"
+            case "policy": return row.schedulerPolicy.map(policyText) ?? "—"
+            case "sleepTime": return row.sleepTimeSeconds.map { "\($0)s" } ?? "—"
+            case "flags": return row.flags.map(ThreadFlagFormatter.flags) ?? "—"
             case "dispatchQueue": return hexString(row.dispatchQueueAddress)
             case "userTime": return formatCPUTime(row.userTime)
             case "kernelTime": return formatCPUTime(row.kernelTime)
@@ -1487,10 +1474,11 @@ private struct ThreadRowsTable: NSViewRepresentable {
             ThreadColumn(rawValue: id)?.isRightAligned == true ? .right : .left
         }
 
-        private func searchableText(for row: ThreadInfo) -> String {
-            [String(row.id), row.name, row.state, String(row.currentPriority), String(row.basePriority), String(row.schedulerPolicy)]
+        private func searchableFields(for row: ThreadInfo) -> [String] {
+            [row.identifierDescription, String(row.id), row.name, row.state,
+             row.currentPriority.map(String.init) ?? "", row.basePriority.map(String.init) ?? "",
+             row.schedulerPolicy.map(String.init) ?? ""]
                 .filter { !$0.isEmpty }
-                .joined(separator: " ")
         }
 
         private func hexString(_ value: UInt64?) -> String {

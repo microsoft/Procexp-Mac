@@ -60,16 +60,16 @@ public struct ActionConfirmation: Sendable, Hashable, Codable {
                 kind: kind,
                 requiresConfirmation: true,
                 destructive: true,
-                title: "Kill Process?",
-                message: "Are you sure you want to kill \(target)? Unsaved data may be lost."
+                title: "Force Quit Process?",
+                message: "Force quit \(target) using SIGKILL? The process cannot save or clean up. Unsaved data may be lost."
             )
         case .killTree:
             return ActionConfirmation(
                 kind: kind,
                 requiresConfirmation: true,
                 destructive: true,
-                title: "Kill Process Tree?",
-                message: "Are you sure you want to kill \(target) and all of its descendant processes? Unsaved data may be lost."
+                title: "Force Quit Process Tree?",
+                message: "Force quit \(target) and its descendant processes using SIGKILL? They cannot save or clean up. Unsaved data may be lost."
             )
         case .restart:
             return ActionConfirmation(
@@ -100,8 +100,8 @@ public struct ActionConfirmation: Sendable, Hashable, Codable {
                 kind: kind,
                 requiresConfirmation: false,
                 destructive: false,
-                title: "Change Priority",
-                message: "Change the scheduling priority of \(target)."
+                title: "Set Nice Value",
+                message: "Set the POSIX nice value of \(target). Lower values request more CPU scheduling preference and may require elevated privileges. This does not change a QoS class."
             )
         case .bringToFront:
             return ActionConfirmation(

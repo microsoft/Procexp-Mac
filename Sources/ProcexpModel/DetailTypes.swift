@@ -12,10 +12,11 @@ public enum FileDescriptorFlagFormatter {
     public static func access(_ flags: UInt32?) -> String {
         guard let flags else { return "" }
         var names: [String]
+        // libproc reports fileglob FREAD/FWRITE, not open(2)'s O_ACCMODE.
         switch flags & 0x3 {
-        case 0: names = ["Read"]
-        case 1: names = ["Write"]
-        case 2, 3: names = ["Read/Write"]
+        case 1: names = ["Read"]
+        case 2: names = ["Write"]
+        case 3: names = ["Read/Write"]
         default: return String(format: "0x%X", flags)
         }
         let definitions: [(UInt32, String)] = [
@@ -85,7 +86,12 @@ public protocol LowerPaneColumn: CaseIterable, Codable, Hashable, Sendable, RawR
     var title: String { get }
     var defaultWidth: Double { get }
     var isRightAligned: Bool { get }
+    var isSupportedOnMac: Bool { get }
     static var requiredColumns: [Self] { get }
+}
+
+public extension LowerPaneColumn {
+    var isSupportedOnMac: Bool { true }
 }
 
 public enum ModuleColumn: String, LowerPaneColumn {
@@ -102,7 +108,7 @@ public enum ModuleColumn: String, LowerPaneColumn {
         switch self {
         case .name: return "Name"
         case .description: return "Description"
-        case .company: return "Company"
+        case .company: return "Organization (inferred)"
         case .version: return "Version"
         case .path: return "Path"
         case .signer: return "Signer"
@@ -115,7 +121,7 @@ public enum ModuleColumn: String, LowerPaneColumn {
         switch self {
         case .name: return 200
         case .description: return 200
-        case .company: return 150
+        case .company: return 180
         case .version: return 90
         case .path: return 320
         case .signer: return 180
@@ -225,7 +231,7 @@ public enum ThreadColumn: String, LowerPaneColumn {
     public var title: String {
         switch self {
         case .state: return "State"
-        case .tid: return "TID"
+        case .tid: return "Thread Identifier"
         case .name: return "Name"
         case .userTime: return "User Time"
         case .kernelTime: return "Kernel Time"
@@ -245,7 +251,7 @@ public enum ThreadColumn: String, LowerPaneColumn {
     public var defaultWidth: Double {
         switch self {
         case .state: return 110
-        case .tid: return 92
+        case .tid: return 170
         case .name: return 150
         case .userTime, .kernelTime, .cpuTime: return 100
         case .cpu: return 70
@@ -268,19 +274,24 @@ public enum ThreadColumn: String, LowerPaneColumn {
         }
     }
 
-    /// Windows Process Explorer's thread view defaults begin with State, TID,
-    /// User Time, Kernel Time, CPU, CPU Time, Start Address, and priorities.
-    /// macOS does not expose wait reason/service/memory-priority/I/O-priority
-    /// equivalents publicly, so defaults stop at the supported equivalents.
+    public var isSupportedOnMac: Bool { self != .startAddress }
+
     public static let defaultColumns: [ThreadColumn] = [
         .state, .tid, .userTime, .kernelTime, .cpu, .cpuTime,
-        .startAddress, .basePriority, .currentPriority
+        .basePriority, .currentPriority
     ]
     public static let requiredColumns: [ThreadColumn] = [.tid]
 }
 
+public enum ThreadIdentifierSource: String, Sendable, Codable {
+    case unknown
+    case libprocHandle
+    case machThreadID
+}
+
 public struct ThreadInfo: Identifiable, Sendable, Hashable {
-    public var id: UInt64            // TID
+    public var id: UInt64
+    public var identifierSource: ThreadIdentifierSource
     public var name: String
     public var cpuPercent: Double
     public var cpuTime: UInt64       // nanoseconds
@@ -289,16 +300,17 @@ public struct ThreadInfo: Identifiable, Sendable, Hashable {
     public var state: String
     public var startAddress: UInt64?
     public var startSymbol: String?
-    public var currentPriority: Int32
-    public var basePriority: Int32
-    public var maxPriority: Int32
-    public var schedulerPolicy: Int32
-    public var sleepTimeSeconds: Int32
-    public var flags: Int32
+    public var currentPriority: Int32?
+    public var basePriority: Int32?
+    public var maxPriority: Int32?
+    public var schedulerPolicy: Int32?
+    public var sleepTimeSeconds: Int32?
+    public var flags: Int32?
     public var dispatchQueueAddress: UInt64?
 
     public init(
         id: UInt64,
+        identifierSource: ThreadIdentifierSource = .unknown,
         name: String = "",
         cpuPercent: Double = 0,
         cpuTime: UInt64 = 0,
@@ -307,15 +319,16 @@ public struct ThreadInfo: Identifiable, Sendable, Hashable {
         state: String = "",
         startAddress: UInt64? = nil,
         startSymbol: String? = nil,
-        currentPriority: Int32 = 0,
-        basePriority: Int32 = 0,
-        maxPriority: Int32 = 0,
-        schedulerPolicy: Int32 = 0,
-        sleepTimeSeconds: Int32 = 0,
-        flags: Int32 = 0,
+        currentPriority: Int32? = nil,
+        basePriority: Int32? = nil,
+        maxPriority: Int32? = nil,
+        schedulerPolicy: Int32? = nil,
+        sleepTimeSeconds: Int32? = nil,
+        flags: Int32? = nil,
         dispatchQueueAddress: UInt64? = nil
     ) {
         self.id = id
+        self.identifierSource = identifierSource
         self.name = name
         self.cpuPercent = cpuPercent
         self.cpuTime = cpuTime
@@ -331,6 +344,14 @@ public struct ThreadInfo: Identifiable, Sendable, Hashable {
         self.sleepTimeSeconds = sleepTimeSeconds
         self.flags = flags
         self.dispatchQueueAddress = dispatchQueueAddress
+    }
+
+    public var identifierDescription: String {
+        switch identifierSource {
+        case .unknown: return "Unknown"
+        case .libprocHandle: return "Handle \(id)"
+        case .machThreadID: return "TID \(id)"
+        }
     }
 }
 
@@ -469,6 +490,11 @@ public enum SocketProto: String, Sendable, Codable {
 }
 
 public struct SocketInfo: Identifiable, Sendable, Codable, Hashable {
+    public static func endpoint(address: String, port: UInt16) -> String {
+        guard port != 0 else { return address }
+        return address.contains(":") ? "[\(address)]:\(port)" : "\(address):\(port)"
+    }
+
     public var id: Int32             // fd
     public var proto: SocketProto
     public var localAddress: String
@@ -613,20 +639,33 @@ public struct SignatureInfo: Sendable, Codable, Hashable {
     public var status: SigningStatus
     public var teamID: String?
     public var authority: [String]
-    public var isNotarized: Bool
-    public var isPlatformBinary: Bool
+    /// Nil means no notarization assessment has been performed.
+    public var isNotarized: Bool?
+    /// Nil means signing metadata could not be read.
+    public var platformBinaryStatus: Bool?
+    /// True only when platform-binary status has been positively established.
+    public var isPlatformBinary: Bool {
+        get { platformBinaryStatus == true }
+        set { platformBinaryStatus = newValue }
+    }
     public var isAdHoc: Bool
     public var sha256: String?
     public var virusTotal: VirusTotalResult?
     public var validationErrorCode: Int32?
     public var validationErrorMessage: String?
 
+    private enum CodingKeys: String, CodingKey {
+        case status, teamID, authority, isNotarized
+        case platformBinaryStatus = "isPlatformBinary"
+        case isAdHoc, sha256, virusTotal, validationErrorCode, validationErrorMessage
+    }
+
     public init(
         status: SigningStatus = .unverified,
         teamID: String? = nil,
         authority: [String] = [],
-        isNotarized: Bool = false,
-        isPlatformBinary: Bool = false,
+        isNotarized: Bool? = nil,
+        isPlatformBinary: Bool? = nil,
         isAdHoc: Bool = false,
         sha256: String? = nil,
         virusTotal: VirusTotalResult? = nil,
@@ -637,12 +676,24 @@ public struct SignatureInfo: Sendable, Codable, Hashable {
         self.teamID = teamID
         self.authority = authority
         self.isNotarized = isNotarized
-        self.isPlatformBinary = isPlatformBinary
+        self.platformBinaryStatus = isPlatformBinary
         self.isAdHoc = isAdHoc
         self.sha256 = sha256
         self.virusTotal = virusTotal
         self.validationErrorCode = validationErrorCode
         self.validationErrorMessage = validationErrorMessage
+    }
+
+    public var notarizationDescription: String {
+        if status == .unsigned { return "Not Applicable" }
+        guard status == .signed else { return "Unknown" }
+        if isPlatformBinary || isAdHoc { return "Not Applicable" }
+        guard let isNotarized else { return "Unknown" }
+        return isNotarized ? "Yes" : "No"
+    }
+
+    public var platformBinaryDescription: String {
+        platformBinaryStatus.map { $0 ? "Yes" : "No" } ?? "Unknown"
     }
 
     /// Best single-line signer string for the "Verified Signer" column.
@@ -691,6 +742,7 @@ public struct SignatureInfo: Sendable, Codable, Hashable {
     }
 
     public var publisherDescription: String? {
+        guard status == .signed else { return nil }
         if isPlatformBinary { return "Apple (platform)" }
         if let first = authority.first, !first.isEmpty { return first }
         if let teamID, !teamID.isEmpty { return "Team \(teamID)" }

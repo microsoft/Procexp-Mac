@@ -21,8 +21,7 @@ struct SystemInfoView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
 
-    /// Static hardware description, gathered once and cached.
-    private let hardware = HardwareInfo.current
+    @State private var hardware = HardwareInfo.current.refreshingResources()
 
     private let tabs: [SystemInfoTab] = [.summary, .cpu, .memory, .io, .network, .gpu]
 
@@ -39,7 +38,8 @@ struct SystemInfoView: View {
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
-                .frame(width: 620)
+                .frame(maxWidth: 620)
+                .padding(.horizontal, 12)
                 .padding(.top, 10)
                 .padding(.bottom, 8)
 
@@ -51,6 +51,9 @@ struct SystemInfoView: View {
             }
         }
         .frame(minWidth: 560, minHeight: 460)
+        .onAppear { hardware = hardware.refreshingResources() }
+        .onChange(of: model.snapshot.timestamp) { hardware = hardware.refreshingResources() }
+        .onChange(of: model.systemInfoTab) { hardware = hardware.refreshingResources() }
         .background(EscapeKeyMonitor { dismiss() })
     }
 
@@ -79,23 +82,23 @@ struct SystemInfoView: View {
     // MARK: - Tabs
 
     private var summaryTab: some View {
-        VStack(spacing: 12) {
-            InfoPanelGrid {
-                hardwareSummaryPanel
-                storageHardwarePanel
-            }
-            FillGraphArea(graphCount: 2) { graphHeight in
-                GraphGrid(minHeight: graphHeight, minWidth: 260) {
-                    cpuTotalPanel(graphHeight: graphHeight)
-                    memoryPanel(graphHeight: graphHeight)
-                    swapPanel(graphHeight: graphHeight)
-                    diskPanel(graphHeight: graphHeight)
-                    networkPanel(graphHeight: graphHeight)
-                    gpuPanel(graphHeight: graphHeight)
+        ScrollView {
+            VStack(spacing: 12) {
+                InfoPanelGrid {
+                    hardwareSummaryPanel
+                    storageHardwarePanel
+                }
+                GraphGrid(minHeight: 110, minWidth: 260) {
+                    cpuTotalPanel(graphHeight: 110)
+                    memoryPanel(graphHeight: 110)
+                    swapPanel(graphHeight: 110)
+                    diskPanel(graphHeight: 110)
+                    networkPanel(graphHeight: 110)
+                    gpuPanel(graphHeight: 110)
                 }
             }
+            .padding(.vertical, 4)
         }
-        .padding(.vertical, 4)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
@@ -107,20 +110,22 @@ struct SystemInfoView: View {
                 let coreCount = model.perCoreHistory.count
                 let columns = max(1, Int((geo.size.width + 12) / 162))
                 let coreRows = max(1, Int(ceil(Double(coreCount) / Double(columns))))
-                let totalHeight = coreCount == 0 ? geo.size.height : max(64, min(112, geo.size.height * 0.24))
+                let totalHeight = coreCount == 0 ? max(68, geo.size.height) : max(68, min(112, geo.size.height * 0.24))
                 let labelHeight: CGFloat = coreCount == 0 ? 0 : 22
                 let verticalSpacing = CGFloat(max(coreRows - 1, 0)) * 12
-                let coreHeight = max(28, (geo.size.height - totalHeight - labelHeight - 24 - verticalSpacing) / CGFloat(coreRows))
-                VStack(spacing: 12) {
-                    cpuTotalPanel(graphHeight: totalHeight)
-                    if coreCount > 0 {
-                        Text("Per-Core Usage")
-                            .font(.headline)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        perCoreGrid(graphHeight: coreHeight)
+                let coreHeight = max(42, (geo.size.height - totalHeight - labelHeight - 24 - verticalSpacing) / CGFloat(coreRows))
+                ScrollView {
+                    VStack(spacing: 12) {
+                        cpuTotalPanel(graphHeight: totalHeight)
+                        if coreCount > 0 {
+                            Text("Per-Core Usage")
+                                .font(.headline)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            perCoreGrid(graphHeight: coreHeight)
+                        }
                     }
+                    .frame(maxWidth: .infinity, alignment: .top)
                 }
-                .frame(width: geo.size.width, height: geo.size.height, alignment: .top)
             }
         }
         .padding(.vertical, 4)
@@ -155,11 +160,12 @@ struct SystemInfoView: View {
     }
 
     private var networkTab: some View {
-        VStack(spacing: 12) {
-            networkHardwarePanel
-                .fixedSize(horizontal: false, vertical: true)
-            FillGraphArea(graphCount: 1) { graphHeight in
-                networkPanel(graphHeight: graphHeight)
+        GeometryReader { geo in
+            ScrollView {
+                VStack(spacing: 12) {
+                    networkHardwarePanel
+                    networkPanel(graphHeight: max(180, geo.size.height * 0.45))
+                }
             }
         }
         .padding(.vertical, 4)
@@ -230,8 +236,9 @@ struct SystemInfoView: View {
             InfoRow("Installed", ByteFormat.bytes(hardware.physicalMemory))
             InfoRow("Page Size", ByteFormat.bytes(hardware.pageSize))
             InfoRow("Page Count", "\(hardware.physicalMemory / max(hardware.pageSize, 1))")
-            if let gpu = hardware.gpus.first, let vram = gpu.vram, gpu.unifiedMemory {
-                InfoRow("GPU Working Set", ByteFormat.bytes(vram))
+            if let gpu = hardware.gpus.first, let budget = gpu.recommendedWorkingSetBudget, gpu.unifiedMemory {
+                InfoRow("Recommended GPU Working-Set Budget", ByteFormat.bytes(budget), labelWidth: 180)
+                    .help("Metal's recommended working-set budget, not installed VRAM or current GPU memory use.")
             }
             if let gpu = hardware.gpus.first, gpu.unifiedMemory {
                 InfoRow("Type", "Unified Memory")
@@ -248,8 +255,12 @@ struct SystemInfoView: View {
                 ForEach(hardware.gpus) { gpu in
                     InfoRow(gpu.name, gpuDetail(gpu))
                     InfoRow("Registry ID", String(format: "0x%llX", gpu.registryID))
-                    InfoRow("Max Threads", gpu.maxThreadsPerThreadgroup)
-                    InfoRow("Max Buffer", ByteFormat.bytes(gpu.maxBufferLength))
+                    if let budget = gpu.recommendedWorkingSetBudget {
+                        InfoRow("Recommended GPU Working-Set Budget", ByteFormat.bytes(budget), labelWidth: 180)
+                            .help("Metal's recommended working-set budget, not installed VRAM or current GPU memory use.")
+                    }
+                    InfoRow("Threadgroup Limits (X/Y/Z)", gpu.maxThreadsPerThreadgroup, labelWidth: 180)
+                    InfoRow("Max Buffer Length", ByteFormat.bytes(gpu.maxBufferLength))
                     InfoRow("Argument Buffers", gpu.argumentBuffersTier)
                     InfoRow("Read/Write Textures", gpu.readWriteTextureTier)
                 }
@@ -314,15 +325,11 @@ struct SystemInfoView: View {
     // MARK: Hardware formatting helpers
 
     private func gpuLabel(_ gpu: HardwareInfo.GPUInfo) -> String {
-        if let vram = gpu.vram {
-            return "\(gpu.name) (\(ByteFormat.bytes(vram)))"
-        }
         return gpu.name
     }
 
     private func gpuDetail(_ gpu: HardwareInfo.GPUInfo) -> String {
         var parts: [String] = []
-        if let vram = gpu.vram { parts.append(ByteFormat.bytes(vram)) }
         parts.append(gpu.unifiedMemory ? "Unified" : "Discrete")
         if gpu.lowPower { parts.append("Low-Power") }
         if gpu.removable { parts.append("Removable") }
@@ -366,12 +373,13 @@ struct SystemInfoView: View {
 
     private func memoryPanel(graphHeight: CGFloat? = nil) -> some View {
         GraphPanel(
-            title: "Physical Memory",
+            title: "Physical Memory Used (%)",
             values: model.memoryHistory.values,
             color: RGBA(230, 90, 90),
             unit: .percent,
             topConsumers: model.memoryTopHistory.values,
             consumerUnit: .bytes,
+            consumerLabel: "Largest Physical Footprint",
             timestamps: model.systemHistoryTimestamps.values,
             graphHeight: graphHeight
         )
@@ -390,12 +398,13 @@ struct SystemInfoView: View {
 
     private func diskPanel(graphHeight: CGFloat? = nil) -> some View {
         GraphPanel(
-            title: "Disk I/O",
+            title: "Disk I/O Rate",
             values: model.diskHistory.values,
             color: RGBA(0, 160, 255),
             unit: .bytesPerSecond,
             topConsumers: model.ioTopHistory.values,
             consumerUnit: .bytes,
+            consumerLabel: "Largest Cumulative Process I/O",
             timestamps: model.systemHistoryTimestamps.values,
             graphHeight: graphHeight
         )
@@ -447,27 +456,24 @@ struct SystemInfoView: View {
 
     private func coreTitle(_ index: Int) -> String {
         switch coreKind(index) {
-        case "P": return "P-Core \(index)"
-        case "E": return "E-Core \(index)"
+        case .performance: return "P-Core \(index)"
+        case .efficiency: return "E-Core \(index)"
         default: return "Core \(index)"
         }
     }
 
     private func coreColor(_ index: Int) -> RGBA {
         switch coreKind(index) {
-        case "P": return RGBA(0, 200, 0)
-        case "E": return RGBA(0, 145, 220)
+        case .performance: return RGBA(0, 200, 0)
+        case .efficiency: return RGBA(0, 145, 220)
         default: return RGBA(0, 200, 0)
         }
     }
 
-    private func coreKind(_ index: Int) -> String? {
-        guard let performance = hardware.performanceCores,
-              let efficiency = hardware.efficiencyCores,
-              performance + efficiency > 0 else { return nil }
-        if index < performance { return "P" }
-        if index < performance + efficiency { return "E" }
-        return nil
+    private func coreKind(_ index: Int) -> CPUCoreKind? {
+        guard let kinds = hardware.coreKinds, kinds.count == model.perCoreHistory.count,
+              kinds.indices.contains(index) else { return nil }
+        return kinds[index]
     }
 }
 
@@ -506,9 +512,11 @@ private struct FillGraphArea<Content: View>: View {
     var body: some View {
         GeometryReader { geo in
             let spacing: CGFloat = max(0, CGFloat(max(graphCount - 1, 0)) * 12)
-            let graphHeight = max(40, (geo.size.height - spacing) / CGFloat(max(graphCount, 1)))
-            content(graphHeight)
-                .frame(width: geo.size.width, height: geo.size.height, alignment: .top)
+            let graphHeight = max(68, (geo.size.height - spacing) / CGFloat(max(graphCount, 1)))
+            ScrollView {
+                content(graphHeight)
+                    .frame(maxWidth: .infinity, alignment: .top)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -576,13 +584,14 @@ enum GraphUnit {
     case bytesPerSecond
 
     func format(_ value: Double) -> String {
+        guard value.isFinite else { return "Unavailable" }
         switch self {
         case .percent:
             return String(format: "%.1f%%", value)
-        case .bytes:
-            return ByteFormat.bytes(UInt64(Swift.max(value, 0)))
-        case .bytesPerSecond:
-            return ByteFormat.bytes(UInt64(Swift.max(value, 0))) + "/s"
+        case .bytes, .bytesPerSecond:
+            let bytes = UInt64(Swift.max(value, 0))
+            let formatted = bytes == 0 ? "0 B" : ByteFormat.bytes(bytes)
+            return self == .bytesPerSecond ? formatted + "/s" : formatted
         }
     }
 }
@@ -600,12 +609,13 @@ private struct GraphPanel: View {
     /// Unit used to format a top consumer's contribution (may differ from the
     /// graph's own unit — e.g. memory graph is a %, its consumer is bytes).
     var consumerUnit: GraphUnit? = nil
+    var consumerLabel: String = "Top"
     var timestamps: [Date] = []
     var graphHeight: CGFloat? = nil
     var compact: Bool = false
 
-    private var current: Double { values.last ?? 0 }
-    private var peak: Double { values.max() ?? 0 }
+    private var current: Double { values.last ?? .nan }
+    private var peak: Double { values.filter(\.isFinite).max() ?? .nan }
 
     /// Upper bound for the graph. Percentages are fixed at 100; byte-based
     /// series auto-scale to the running peak with a little headroom.
@@ -614,13 +624,14 @@ private struct GraphPanel: View {
         case .percent:
             return 100
         case .bytes, .bytesPerSecond:
-            return Swift.max(peak * 1.15, 1)
+            return peak.isFinite ? Swift.max(peak * 1.15, 1) : 1
         }
     }
 
     var body: some View {
         let headerReserve: CGFloat = compact ? 18 : 28
-        let canvasHeight = graphHeight.map { max(compact ? 20 : 40, $0 - headerReserve) } ?? (compact ? 60 : 110)
+        let panelHeight = graphHeight.map { max(compact ? 42 : 68, $0) }
+        let canvasHeight = panelHeight.map { $0 - headerReserve } ?? (compact ? 60 : 110)
         VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .firstTextBaseline) {
                 Text(title)
@@ -630,7 +641,7 @@ private struct GraphPanel: View {
                     .font(compact ? .caption : .subheadline)
                     .monospacedDigit()
                     .foregroundStyle(swiftColor)
-                if !compact {
+                if !compact && peak.isFinite {
                     Text("Peak \(unit.format(peak))")
                         .font(.caption)
                         .monospacedDigit()
@@ -645,11 +656,12 @@ private struct GraphPanel: View {
                 topConsumers: topConsumers,
                 unit: unit,
                 consumerUnit: consumerUnit ?? unit,
+                consumerLabel: consumerLabel,
                 timestamps: timestamps,
                 height: canvasHeight
             )
         }
-        .frame(height: graphHeight, alignment: .top)
+        .frame(height: panelHeight, alignment: .top)
         .clipped()
     }
 
@@ -671,6 +683,7 @@ struct HoverableGraph: View {
     var topConsumers: [TopConsumer] = []
     var unit: GraphUnit
     var consumerUnit: GraphUnit
+    var consumerLabel: String = "Top"
     var timestamps: [Date] = []
     var height: CGFloat = 110
 
@@ -737,10 +750,12 @@ struct HoverableGraph: View {
         return width * CGFloat(index) / CGFloat(values.count - 1)
     }
 
+    private var tooltipWidth: CGFloat { consumerLabel == "Top" ? 148 : 248 }
+
     /// Keep the tooltip on-screen: flip it to the opposite side of the guide
     /// line depending on which half of the graph the cursor is in.
     private func tooltipCenter(x: CGFloat, size: CGSize) -> CGPoint {
-        let halfWidth: CGFloat = 78
+        let halfWidth = tooltipWidth / 2 + 4
         let offset: CGFloat = x < size.width / 2 ? halfWidth + 8 : -(halfWidth + 8)
         let px = Swift.min(Swift.max(x + offset, halfWidth), size.width - halfWidth)
         return CGPoint(x: px, y: 38)
@@ -762,7 +777,7 @@ struct HoverableGraph: View {
                 .monospacedDigit()
             if let consumer, consumer.isValid {
                 Divider()
-                Text("Top: \(consumer.name)")
+                Text("\(consumerLabel): \(consumer.name)")
                     .font(.caption2)
                     .lineLimit(1)
                 Text(consumerUnit.format(consumer.value))
@@ -772,7 +787,7 @@ struct HoverableGraph: View {
             }
         }
         .padding(6)
-        .frame(width: 148, alignment: .leading)
+        .frame(width: tooltipWidth, alignment: .leading)
         // Opaque, adaptive background + `.primary` text so the tip is legible
         // in BOTH light and dark mode (never dark-on-dark). The graph behind is
         // always a dark panel, so an opaque control-background surface with a
