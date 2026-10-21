@@ -59,7 +59,7 @@ public final class SparklineView: NSView {
 
         guard values.count > 1, bounds.width > 0, bounds.height > 0 else { return }
 
-        let denom = maxValue > 0 ? maxValue : 1
+        let denom = maxValue.isFinite && maxValue > 0 ? maxValue : 1
         let stepX = bounds.width / CGFloat(values.count - 1)
 
         func point(at index: Int) -> NSPoint {
@@ -69,25 +69,22 @@ public final class SparklineView: NSView {
             return NSPoint(x: x, y: y)
         }
 
-        // Filled area under the line.
-        let fill = NSBezierPath()
-        fill.move(to: NSPoint(x: bounds.minX, y: bounds.minY))
-        for index in values.indices {
-            fill.line(to: point(at: index))
-        }
-        fill.line(to: NSPoint(x: bounds.maxX, y: bounds.minY))
-        fill.close()
-        NSColor(fillColor).setFill()
-        fill.fill()
+        for segment in values.indices.split(whereSeparator: { !values[$0].isFinite }) {
+            guard let first = segment.first, let last = segment.last, first != last else { continue }
+            let fill = NSBezierPath()
+            fill.move(to: NSPoint(x: point(at: first).x, y: bounds.minY))
+            for index in segment { fill.line(to: point(at: index)) }
+            fill.line(to: NSPoint(x: point(at: last).x, y: bounds.minY))
+            fill.close()
+            NSColor(fillColor).setFill()
+            fill.fill()
 
-        // Line stroke.
-        let line = NSBezierPath()
-        line.lineWidth = 1
-        line.move(to: point(at: 0))
-        for index in values.indices.dropFirst() {
-            line.line(to: point(at: index))
+            let line = NSBezierPath()
+            line.lineWidth = 1
+            line.move(to: point(at: first))
+            for index in segment.dropFirst() { line.line(to: point(at: index)) }
+            NSColor(lineColor).setStroke()
+            line.stroke()
         }
-        NSColor(lineColor).setStroke()
-        line.stroke()
     }
 }

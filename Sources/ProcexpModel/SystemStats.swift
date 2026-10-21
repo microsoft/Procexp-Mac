@@ -8,6 +8,10 @@
 import Foundation
 
 public struct SystemStats: Sendable, Hashable {
+    public enum Metric: String, Codable, Sendable, Hashable, CaseIterable {
+        case cpu, memory, swap, disk, network, gpu
+    }
+    public var unavailableMetrics: Set<Metric>
     public var cpuTotalPercent: Double        // 0...100 (averaged across cores)
     public var perCoreCPUPercent: [Double]    // each 0...100
     public var memoryUsed: UInt64
@@ -35,8 +39,10 @@ public struct SystemStats: Sendable, Hashable {
         gpuPercent: Double? = nil,
         processCount: Int = 0,
         threadCount: Int = 0,
-        handleCount: Int = 0
+        handleCount: Int = 0,
+        unavailableMetrics: Set<Metric> = []
     ) {
+        self.unavailableMetrics = unavailableMetrics
         self.cpuTotalPercent = cpuTotalPercent
         self.perCoreCPUPercent = perCoreCPUPercent
         self.memoryUsed = memoryUsed
@@ -52,7 +58,7 @@ public struct SystemStats: Sendable, Hashable {
         self.handleCount = handleCount
     }
 
-    public static let zero = SystemStats()
+    public static let zero = SystemStats(unavailableMetrics: Set(Metric.allCases))
 }
 
 /// Fixed-capacity ring buffer used to back the history graphs. Appending past

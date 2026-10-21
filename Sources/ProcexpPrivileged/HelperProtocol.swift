@@ -87,10 +87,10 @@ public enum HelperConstants {
     func strings(pid: Int32, withReply reply: @escaping (Data?, Error?) -> Void)
 
     /// Send a POSIX signal to any process (kill / suspend / resume).
-    func sendSignal(pid: Int32, signal: Int32, withReply reply: @escaping (Error?) -> Void)
+    func sendSignal(pid: Int32, startTime: UInt64, signal: Int32, withReply reply: @escaping (Error?) -> Void)
 
     /// Set a process's `nice` value.
-    func setNice(pid: Int32, nice: Int32, withReply reply: @escaping (Error?) -> Void)
+    func setNice(pid: Int32, startTime: UInt64, nice: Int32, withReply reply: @escaping (Error?) -> Void)
 }
 
 /// Domain + codes for `NSError`s the helper returns across XPC. The client maps

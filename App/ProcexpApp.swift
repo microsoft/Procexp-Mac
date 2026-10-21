@@ -14,10 +14,11 @@ struct ProcexpApp: App {
     @State private var model = ProcexpApp.sharedModel
 
     var body: some Scene {
-        WindowGroup("Sysinternals Process Explorer", id: "main") {
+        Window("Sysinternals Process Explorer", id: "main") {
             ContentView()
                 .environment(model)
                 .frame(minWidth: 900, minHeight: 500)
+                .background(MainWindowRegistration(configure: appDelegate.registerMainWindow))
         }
         .defaultSize(width: 1100, height: 650)
         .commands {
@@ -85,7 +86,7 @@ struct ProcexpApp: App {
 
         // Process Explorer Find ▸ Find Handle or DLL… window. This is a real
         // window (not a sheet) so it has standard close/minimize/zoom controls.
-        Window("Find Handle or DLL", id: FindHandleDLLWindow.id) {
+        Window("Find Mapped Files or File Descriptors", id: FindHandleDLLWindow.id) {
             FindHandleDLLView()
                 .environment(model)
         }
@@ -105,6 +106,35 @@ struct ProcexpApp: App {
         }
         .windowResizability(.contentSize)
         .defaultPosition(.center)
+    }
+}
+
+private struct MainWindowRegistration: NSViewRepresentable {
+    var configure: (NSWindow) -> Void
+
+    func makeNSView(context: Context) -> RegistrationView {
+        RegistrationView(configure: configure)
+    }
+
+    func updateNSView(_ view: RegistrationView, context: Context) {
+        view.configure = configure
+    }
+
+    final class RegistrationView: NSView {
+        var configure: (NSWindow) -> Void
+
+        init(configure: @escaping (NSWindow) -> Void) {
+            self.configure = configure
+            super.init(frame: .zero)
+            setAccessibilityElement(false)
+        }
+
+        required init?(coder: NSCoder) { return nil }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if let window { configure(window) }
+        }
     }
 }
 
@@ -139,17 +169,19 @@ private struct InstallHelperMenuCommand: View {
     @Bindable var model: AppModel
 
     var body: some View {
-        Button(model.helperInstalled ? "Privileged Helper Installed" : "Install Privileged Helper…") {
+        Button(model.helperInstalled ? "Privileged Helper Enabled"
+               : model.helperApprovalPending ? "Privileged Helper Awaiting Approval"
+               : "Install Privileged Helper…") {
             let model = model
             Task { await runHelperInstall(model) }
         }
-        .disabled(model.helperInstalled)
+        .disabled(model.helperInstalled || model.helperApprovalPending)
 
         Button("Uninstall Privileged Helper…") {
             let model = model
             Task { await runHelperUninstall(model) }
         }
-        .disabled(!model.helperInstalled)
+        .disabled(!model.helperInstalled && !model.helperApprovalPending)
     }
 }
 
@@ -170,7 +202,9 @@ enum FindHandleDLLWindow {
 private func runHelperInstall(_ model: AppModel) async {
     let result = await model.installPrivilegedHelper()
     let alert = NSAlert()
-    alert.messageText = result.ok ? "Privileged Helper Installed" : "Could Not Install Helper"
+    alert.messageText = result.ok
+        ? (model.helperApprovalPending ? "Helper Awaiting Approval" : "Privileged Helper Enabled")
+        : "Could Not Enable Helper"
     alert.informativeText = result.message
     alert.alertStyle = result.ok ? .informational : .warning
     alert.addButton(withTitle: "OK")

@@ -41,23 +41,23 @@ public enum Column: String, CaseIterable, Sendable, Codable {
         case .ppid:         return "Parent PID"
         case .cpu:          return "CPU"
         case .cpuTime:      return "CPU Time"
-        case .privateBytes: return "Private Bytes"
-        case .workingSet:   return "Working Set"
+        case .privateBytes: return "Physical Footprint"
+        case .workingSet:   return "Resident Memory (RSS)"
         case .virtualSize:  return "Virtual Size"
         case .threads:      return "Threads"
-        case .handles:      return "Handles"
+        case .handles:      return "File Descriptors"
         case .description:  return "Description"
-        case .company:      return "Company Name"
+        case .company:      return "Organization (inferred)"
         case .version:      return "Version"
         case .path:         return "Path"
         case .commandLine:  return "Command Line"
         case .user:         return "User Name"
-        case .session:      return "Session"
+        case .session:      return "Terminal (TTY)"
         case .startTime:    return "Start Time"
-        case .priority:     return "Priority"
-        case .nice:         return "Nice"
-        case .ioRead:       return "I/O Read Bytes"
-        case .ioWrite:      return "I/O Write Bytes"
+        case .priority:     return "Task Priority"
+        case .nice:         return "Nice Value"
+        case .ioRead:       return "Bytes Read (cumulative)"
+        case .ioWrite:      return "Bytes Written (cumulative)"
         case .runningThreads: return "Running Threads"
         case .pageIns:      return "Page Ins"
         case .cowFaults:    return "COW Faults"
@@ -86,19 +86,21 @@ public enum Column: String, CaseIterable, Sendable, Codable {
         case .ppid:         return 78
         case .cpu:          return 54
         case .cpuTime:      return 88
-        case .privateBytes, .workingSet, .virtualSize: return 96
+        case .privateBytes: return 130
+        case .workingSet:   return 155
+        case .virtualSize:  return 96
         case .threads:      return 62
-        case .handles:      return 68
+        case .handles:      return 120
         case .description:  return 220
-        case .company:      return 170
+        case .company:      return 180
         case .version:      return 118
         case .path, .commandLine: return 420
         case .user:         return 130
-        case .session:      return 76
+        case .session:      return 105
         case .startTime:    return 142
-        case .priority:     return 70
-        case .nice:         return 48
-        case .ioRead, .ioWrite: return 110
+        case .priority:     return 100
+        case .nice:         return 80
+        case .ioRead, .ioWrite: return 180
         case .runningThreads: return 108
         case .pageIns, .cowFaults: return 90
         case .machMessagesSent, .machMessagesReceived: return 120
@@ -152,7 +154,7 @@ public enum Column: String, CaseIterable, Sendable, Codable {
         case .ppid:         return p.parent.map { String($0.pid) } ?? ""
         case .cpu:          return p.hasTaskInfo ? (p.cpuPercent < 0.01 ? "" : String(format: "%.2f", p.cpuPercent)) : ""
         case .cpuTime:      return p.hasTaskInfo ? ByteFormat.duration(nanos: p.cpuTime) : ""
-        case .privateBytes: return p.hasTaskInfo ? ByteFormat.bytes(p.physFootprint ?? p.residentSize) : ""
+        case .privateBytes: return p.hasTaskInfo ? p.physFootprint.map(ByteFormat.bytes) ?? "" : ""
         case .workingSet:   return p.hasTaskInfo ? ByteFormat.bytes(p.residentSize) : ""
         case .virtualSize:  return p.hasTaskInfo ? ByteFormat.bytes(p.virtualSize) : ""
         case .threads:      return p.hasTaskInfo ? String(p.threadCount) : ""
@@ -200,7 +202,7 @@ public enum Column: String, CaseIterable, Sendable, Codable {
         case .ppid:         return .number(Double(p.parent?.pid ?? -1))
         case .cpu:          return p.hasTaskInfo ? .number(p.cpuPercent) : .none
         case .cpuTime:      return p.hasTaskInfo ? .number(Double(p.cpuTime)) : .none
-        case .privateBytes: return p.hasTaskInfo ? .number(Double(p.physFootprint ?? p.residentSize)) : .none
+        case .privateBytes: return p.hasTaskInfo ? p.physFootprint.map { .number(Double($0)) } ?? .none : .none
         case .workingSet:   return p.hasTaskInfo ? .number(Double(p.residentSize)) : .none
         case .virtualSize:  return p.hasTaskInfo ? .number(Double(p.virtualSize)) : .none
         case .threads:      return p.hasTaskInfo ? .number(Double(p.threadCount)) : .none

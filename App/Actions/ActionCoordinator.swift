@@ -29,22 +29,28 @@ import ProcexpActions
 @MainActor
 @Observable
 final class ActionCoordinator {
+    enum Presentation: Equatable {
+        case main
+        case properties(ProcessID)
+    }
+
     /// A confirmation-requiring action staged for the view to present.
     struct Pending: Identifiable {
         let id = UUID()
         let kind: ProcessActionKind
         let pid: ProcessID
         let confirmation: ActionConfirmation
+        let presentation: Presentation
 
-        /// Verb for the confirm button ("Kill", "Kill Tree", "Restart").
+        /// Verb for the confirm button.
         var confirmButtonTitle: String {
             switch kind {
-            case .kill: return "Kill"
-            case .killTree: return "Kill Tree"
+            case .kill: return "Force Quit"
+            case .killTree: return "Force Quit Tree"
             case .restart: return "Restart"
             case .suspend: return "Suspend"
             case .resume: return "Resume"
-            case .setNice: return "Change Priority"
+            case .setNice: return "Set Nice Value"
             case .bringToFront: return "Bring to Front"
             }
         }
@@ -56,18 +62,20 @@ final class ActionCoordinator {
     /// Non-nil while an error alert should be shown.
     var errorTitle: String = ""
     var errorMessage: String?
+    var errorPresentation: Presentation = .main
 
     // MARK: - Entry points
 
     /// Request an action for a process. Presents a confirmation prompt when the
     /// action's `ActionConfirmation` demands one; otherwise performs it now.
-    func request(_ kind: ProcessActionKind, pid: ProcessID, model: AppModel) {
+    func request(_ kind: ProcessActionKind, pid: ProcessID, model: AppModel,
+                 presentation: Presentation = .main) {
         guard let record = model.snapshot.info(pid) else { return }
         let confirmation = ActionConfirmation.forKind(kind, processName: record.name)
         if confirmation.requiresConfirmation && model.confirmBeforeKill {
-            pending = Pending(kind: kind, pid: pid, confirmation: confirmation)
+            pending = Pending(kind: kind, pid: pid, confirmation: confirmation, presentation: presentation)
         } else {
-            Task { await perform(kind, pid: pid, model: model) }
+            Task { await perform(kind, pid: pid, model: model, presentation: presentation) }
         }
     }
 
@@ -75,7 +83,7 @@ final class ActionCoordinator {
     func confirm(model: AppModel) {
         guard let staged = pending else { return }
         pending = nil
-        Task { await perform(staged.kind, pid: staged.pid, model: model) }
+        Task { await perform(staged.kind, pid: staged.pid, model: model, presentation: staged.presentation) }
     }
 
     /// The user dismissed the confirmation prompt.
@@ -94,7 +102,8 @@ final class ActionCoordinator {
         _ kind: ProcessActionKind,
         pid: ProcessID,
         model: AppModel,
-        nice: Int32 = 0
+        nice: Int32 = 0,
+        presentation: Presentation = .main
     ) async {
         guard let record = model.snapshot.info(pid) else { return }
         let actions = model.actions
@@ -116,18 +125,28 @@ final class ActionCoordinator {
                 actions.bringToFront(pid)
             }
         } catch ProviderError.notPermitted {
-            errorTitle = "Elevated Privileges Required"
-            errorMessage = "“\(record.name)” (PID \(record.id.pid)) belongs to another user or is protected, so this action requires elevated privileges. A privileged helper — coming in a later update — will enable actions across users."
+            errorPresentation = presentation
+            errorTitle = "Action Not Permitted"
+            let helperNote = model.helperInstalled
+                ? "The privileged helper is enabled, but macOS protections can still deny access."
+                : "The privileged helper is not enabled. Enabling it can permit additional actions, but does not bypass macOS process protection."
+            let niceNote = kind == .setNice
+                ? " Lowering a nice value can require elevated privileges, even for your own process."
+                : ""
+            errorMessage = "macOS denied this action for “\(record.name)” (PID \(record.id.pid)). This may be due to credentials or process protection; the denial alone does not establish the cause. \(helperNote)\(niceNote)"
         } catch ProviderError.processGone {
             // The process already exited; nothing to report. The next refresh
             // removes its row.
         } catch ProviderError.unsupported {
+            errorPresentation = presentation
             errorTitle = "Action Not Supported"
             errorMessage = "This action isn’t available for “\(record.name)” (PID \(record.id.pid))."
         } catch let ProviderError.underlying(detail) {
+            errorPresentation = presentation
             errorTitle = "Action Failed"
             errorMessage = detail
         } catch {
+            errorPresentation = presentation
             errorTitle = "Action Failed"
             errorMessage = error.localizedDescription
         }

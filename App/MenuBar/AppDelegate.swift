@@ -47,32 +47,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Called from the SwiftUI scene's `.task` to hand the delegate the shared
     /// `AppModel`, which it then observes to drive the menu-bar graph.
     func attach(model: AppModel) {
+        menuBar.onShowMainWindow = { [weak self] in self?.showMainWindow() }
         menuBar.attach(model: model)
     }
 
-    private func showMainWindow() {
-        if let mainWindow {
-            mainWindow.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
-            return
-        }
-
-        let root = ContentView()
-            .environment(ProcexpApp.sharedModel)
-            .frame(minWidth: 900, minHeight: 500)
-
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 1100, height: 650),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
-            backing: .buffered,
-            defer: false
-        )
-        window.title = "Sysinternals Process Explorer"
-        window.titleVisibility = .visible
-        window.center()
-        window.contentView = NSHostingView(rootView: root)
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+    func registerMainWindow(_ window: NSWindow) {
+        guard mainWindow !== window else { return }
+        window.isReleasedWhenClosed = false
         mainWindow = window
+        Task { @MainActor [weak self] in self?.showMainWindow() }
+    }
+
+    private func showMainWindow() {
+        guard let mainWindow else { return }
+        if mainWindow.isMiniaturized { mainWindow.deminiaturize(nil) }
+        mainWindow.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 }

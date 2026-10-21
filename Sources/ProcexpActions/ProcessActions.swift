@@ -67,10 +67,10 @@ public struct ProcessActions: Sendable {
     ///
     /// Best-effort: processes that have already exited (`ESRCH` /
     /// `.processGone`) are ignored. Other failures are tolerated so the rest of
-    /// the tree is still attempted; the *first* `.notPermitted` encountered is
-    /// rethrown at the end so the caller can decide whether to escalate.
+    /// the tree is still attempted; the first other failure is rethrown at the
+    /// end rather than reporting complete success.
     public func killTree(_ id: ProcessID, in snapshot: ProcessSnapshot) async throws {
-        var firstNotPermitted: Error?
+        var firstFailure: Error?
 
         // Post-order traversal: descendants before the node itself.
         func recurse(_ node: ProcessID) async {
@@ -81,37 +81,35 @@ public struct ProcessActions: Sendable {
                 try await kill(node)
             } catch ProviderError.processGone {
                 // Already gone — nothing to do.
-            } catch ProviderError.notPermitted {
-                if firstNotPermitted == nil {
-                    firstNotPermitted = ProviderError.notPermitted
-                }
             } catch {
-                // Best-effort: keep tearing down the rest of the tree.
+                if firstFailure == nil { firstFailure = error }
             }
         }
 
         await recurse(id)
-        if let firstNotPermitted { throw firstNotPermitted }
+        if let firstFailure { throw firstFailure }
     }
 
     // MARK: - Scheduling
 
     /// Set a process's `nice` value via `setpriority(PRIO_PROCESS, …)`.
     ///
-    /// `setpriority` legitimately returns `-1` for a valid new priority, so the
-    /// result is disambiguated by clearing and re-reading `errno`. On
-    /// `.notPermitted`, escalates through the privileged helper if injected.
+    /// `setpriority` returns zero on success and `-1` on failure (unlike
+    /// `getpriority`, which can legitimately return a negative priority).
+    /// On `.notPermitted`, escalates through the privileged helper if injected.
     public func setNice(_ id: ProcessID, to nice: Int32) async throws {
-        errno = 0
-        let rc = setpriority(PRIO_PROCESS, id_t(id.pid), nice)
-        if rc == -1 && errno != 0 {
-            let mapped = Self.mapErrno(errno)
-            if case .notPermitted = mapped {
-                guard let privileged else { throw ProviderError.notPermitted }
-                try await privileged.setNice(id, to: nice)
-                return
+        do {
+            try ProcessLifetime.validateForControl(id)
+            errno = 0
+            let rc = setpriority(PRIO_PROCESS, id_t(id.pid), nice)
+            if rc == -1 {
+                throw errno == 0
+                    ? ProviderError.underlying("setpriority failed without an OS error.")
+                    : Self.mapErrno(errno)
             }
-            throw mapped
+        } catch ProviderError.notPermitted {
+            guard let privileged else { throw ProviderError.notPermitted }
+            try await privileged.setNice(id, to: nice)
         }
     }
 
@@ -172,6 +170,7 @@ public struct ProcessActions: Sendable {
     /// Send `sig` to `id` locally, escalating to the privileged helper on EPERM.
     private func signal(_ id: ProcessID, _ sig: Int32) async throws {
         do {
+            try ProcessLifetime.validateForControl(id)
             try Self.posixKill(id.pid, sig)
         } catch ProviderError.notPermitted {
             guard let privileged else { throw ProviderError.notPermitted }

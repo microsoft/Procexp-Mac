@@ -86,9 +86,11 @@ private struct BSDCredentialSnapshot {
 final class PropertiesDetail {
     // Dynamic (re-fetched on a timer while the window is open).
     var threads: [ThreadInfo] = []
+    var threadNote: String?
     var sockets: [SocketInfo] = []
     var socketRemoteNames: [String: String] = [:]
     var socketHighlights: [String: TimedListRowHighlight] = [:]
+    private var liveSocketKeys: Set<String> = []
     var socketNote: String?
     private var socketRemoteNameInFlight: Set<String> = []
 
@@ -116,6 +118,7 @@ final class PropertiesDetail {
     // Signing / reputation.
     var signature: SignatureInfo?
     var isVerifying = false
+    private var verificationGeneration = 0
     var isCheckingVirusTotal = false
     var virusTotalNote: String?
 
@@ -167,7 +170,7 @@ final class PropertiesDetail {
                 .map { EnvVar(id: $0.key, value: $0.value) }
                 .sorted { $0.id.lowercased() < $1.id.lowercased() }
             environmentNote = env.isEmpty
-                ? "No environment variables were returned. macOS only exposes the environment of processes owned by the current user; other processes require the privileged helper."
+                ? "No environment variables were returned. The environment may be empty, the process may have exited, or macOS may have restricted access. Helper access does not bypass process protection."
                 : nil
         } catch {
             environment = []
@@ -224,7 +227,16 @@ final class PropertiesDetail {
         network: any NetworkProviding,
         highlightDuration: TimeInterval
     ) async {
-        if let updated = try? await data.threads(of: pid) { threads = updated }
+        do {
+            let updated = try await data.threads(of: pid)
+            guard !Task.isCancelled else { return }
+            threads = updated
+            threadNote = nil
+        } catch {
+            guard !Task.isCancelled else { return }
+            threads = []
+            threadNote = "Threads unavailable: \(describe(error))"
+        }
         do {
             let updated = try await network.sockets(of: pid)
             sockets = mergeSockets(updated, highlightDuration: highlightDuration)
@@ -232,6 +244,8 @@ final class PropertiesDetail {
             socketNote = updated.isEmpty ? Self.emptySocketsNote(record: record, data: data) : nil
         } catch {
             sockets = []
+            liveSocketKeys = []
+            socketHighlights = [:]
             socketNote = "TCP/IP sockets unavailable: \(describe(error))"
         }
     }
@@ -259,8 +273,9 @@ final class PropertiesDetail {
         let expiry = now.addingTimeInterval(max(0.2, highlightDuration))
         let oldByID = Dictionary(uniqueKeysWithValues: sockets.map { (socketKey($0), $0) })
         let newByID = Dictionary(uniqueKeysWithValues: incoming.map { (socketKey($0), $0) })
-        let oldIDs = Set(oldByID.keys)
+        let oldIDs = liveSocketKeys
         let newIDs = Set(newByID.keys)
+        liveSocketKeys = newIDs
         socketHighlights = socketHighlights.filter { $0.value.expiresAt > now }
         if oldByID.isEmpty && socketHighlights.isEmpty { return incoming }
         for id in newIDs.subtracting(oldIDs) {
@@ -291,6 +306,10 @@ final class PropertiesDetail {
             let address = socket.remoteAddress
             Task { @MainActor in
                 let name = await Self.reverseDNSName(for: address) ?? ""
+                guard self.sockets.contains(where: { self.socketKey($0) == key }) else {
+                    self.socketRemoteNameInFlight.remove(key)
+                    return
+                }
                 socketRemoteNames[key] = name
                 socketRemoteNameInFlight.remove(key)
             }
@@ -347,22 +366,28 @@ final class PropertiesDetail {
         lastSampleTimestamp = timestamp
 
         cpuRing.append(record.cpuPercent)
-        privateRing.append(Double(record.physFootprint ?? record.residentSize))
+        privateRing.append(record.physFootprint.map { Double($0) } ?? .nan)
 
         // I/O throughput = Δ(read + write) / Δt.
-        let ioTotal = (record.diskBytesRead ?? 0) + (record.diskBytesWritten ?? 0)
-        if let lastBytes = lastIOBytes, let lastTime = lastIOTime {
-            let dt = timestamp.timeIntervalSince(lastTime)
-            if dt > 0 && ioTotal >= lastBytes {
-                ioRing.append(Double(ioTotal - lastBytes) / dt)
+        if let read = record.diskBytesRead, let written = record.diskBytesWritten {
+            let ioTotal = read + written
+            if let lastBytes = lastIOBytes, let lastTime = lastIOTime {
+                let dt = timestamp.timeIntervalSince(lastTime)
+                if dt > 0 && ioTotal >= lastBytes {
+                    ioRing.append(Double(ioTotal - lastBytes) / dt)
+                } else {
+                    ioRing.append(0)
+                }
             } else {
                 ioRing.append(0)
             }
+            lastIOBytes = ioTotal
+            lastIOTime = timestamp
         } else {
-            ioRing.append(0)
+            ioRing.append(.nan)
+            lastIOBytes = nil
+            lastIOTime = nil
         }
-        lastIOBytes = ioTotal
-        lastIOTime = timestamp
 
         // Page-fault delta.
         if let pf = record.pageFaults {
@@ -375,13 +400,17 @@ final class PropertiesDetail {
 
     /// Runs a fresh code-signature verification for the image path.
     func verifySignature(path: String, signing: any SigningProviding) async {
+        verificationGeneration += 1
+        let generation = verificationGeneration
         isVerifying = true
-        let existingVT = signature?.virusTotal
+        defer { if verificationGeneration == generation { isVerifying = false } }
         var result = await signing.signature(forPath: path)
+        guard !Task.isCancelled, verificationGeneration == generation else { return }
         // Preserve any VirusTotal result the user already fetched.
-        if result.virusTotal == nil { result.virusTotal = existingVT }
+        if let sha = result.sha256, sha == signature?.sha256, result.virusTotal == nil {
+            result.virusTotal = signature?.virusTotal
+        }
         signature = result
-        isVerifying = false
     }
 
     /// Looks up the current image's SHA-256 on VirusTotal (best-effort).
@@ -395,11 +424,14 @@ final class PropertiesDetail {
         defer { isCheckingVirusTotal = false }
         do {
             if let vt = try await signing.virusTotal(sha256: sha) {
+                guard !Task.isCancelled, signature?.sha256 == sha else { return }
                 signature?.virusTotal = vt
             } else {
+                guard !Task.isCancelled, signature?.sha256 == sha else { return }
                 virusTotalNote = "No VirusTotal result (no API key configured, or the file is unknown to VirusTotal)."
             }
         } catch {
+            guard !Task.isCancelled, signature?.sha256 == sha else { return }
             virusTotalNote = "VirusTotal lookup failed: \(describe(error))"
         }
     }
@@ -542,9 +574,11 @@ final class PropertiesDetail {
     }
 
     private static func formatPlistValue(_ value: Any) -> String {
-        if let bool = value as? Bool { return bool ? "true" : "false" }
+        if let number = value as? NSNumber {
+            if CFGetTypeID(number) == CFBooleanGetTypeID() { return number.boolValue ? "true" : "false" }
+            return number.stringValue
+        }
         if let string = value as? String { return string }
-        if let number = value as? NSNumber { return number.stringValue }
         if let date = value as? Date { return ByteFormat.dateTime(date) }
         if let data = value as? Data { return "<\(data.count) bytes>" }
         if let array = value as? [Any] {

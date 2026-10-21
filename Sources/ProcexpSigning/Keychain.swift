@@ -21,8 +21,8 @@ enum Keychain {
     /// Single account under the service — we only ever store one API key.
     static let account = "api-key"
 
-    /// Reads the stored API key, or `nil` if none has been configured.
-    static func readAPIKey() -> String? {
+    /// Reads the stored API key; only absent or empty values are unconfigured.
+    static func readAPIKey() throws -> String? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -33,12 +33,12 @@ enum Keychain {
 
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
-        guard status == errSecSuccess,
-              let data = item as? Data,
-              let key = String(data: data, encoding: .utf8),
-              !key.isEmpty
-        else { return nil }
-        return key
+        if status == errSecItemNotFound { return nil }
+        guard status == errSecSuccess else { throw failure("read", status: status) }
+        guard let data = item as? Data, let key = String(data: data, encoding: .utf8) else {
+            throw ProviderError.underlying("Keychain API key is not valid UTF-8 data.")
+        }
+        return key.isEmpty ? nil : key
     }
 
     /// Stores (or replaces) the API key. Throws `ProviderError.underlying` on
@@ -50,14 +50,24 @@ enum Keychain {
             kSecAttrAccount as String: account,
         ]
 
-        // Replace semantics: delete any existing item, then add fresh.
-        SecItemDelete(base as CFDictionary)
-
-        var add = base
-        add[kSecValueData as String] = Data(key.utf8)
-        let status = SecItemAdd(add as CFDictionary, nil)
-        guard status == errSecSuccess else {
-            throw ProviderError.underlying("Keychain write failed (OSStatus \(status))")
+        let value = [kSecValueData as String: Data(key.utf8)]
+        var status = SecItemUpdate(base as CFDictionary, value as CFDictionary)
+        if status == errSecItemNotFound {
+            var add = base
+            add[kSecValueData as String] = value[kSecValueData as String]
+            status = SecItemAdd(add as CFDictionary, nil)
+            // Another writer may have inserted the item after our update.
+            if status == errSecDuplicateItem {
+                status = SecItemUpdate(base as CFDictionary, value as CFDictionary)
+            }
         }
+        guard status == errSecSuccess else {
+            throw failure("write", status: status)
+        }
+    }
+
+    private static func failure(_ operation: String, status: OSStatus) -> ProviderError {
+        let detail = SecCopyErrorMessageString(status, nil) as String? ?? "Security.framework error"
+        return .underlying("Keychain \(operation) failed (OSStatus \(status)): \(detail)")
     }
 }

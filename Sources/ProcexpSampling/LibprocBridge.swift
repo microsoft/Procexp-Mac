@@ -10,10 +10,29 @@
 
 import Foundation
 import Darwin
+import os
 import ProcexpModel
 
 /// Namespace for the raw kernel-facing helpers.
 enum Libproc {
+    private static let timebase: mach_timebase_info_data_t = {
+        var value = mach_timebase_info_data_t()
+        precondition(mach_timebase_info(&value) == KERN_SUCCESS && value.denom != 0,
+                     "Mach timebase must be available")
+        return value
+    }()
+
+    static func cpuNanoseconds(_ absoluteTime: UInt64) -> UInt64? {
+        // PROC_PIDTASKINFO times are Mach absolute units, not nanoseconds.
+        let product = absoluteTime.multipliedFullWidth(by: UInt64(timebase.numer))
+        let denominator = UInt64(timebase.denom)
+        guard product.high < denominator else {
+            Logger(subsystem: "com.sysinternals.procexpmac", category: "Sampling")
+                .error("Invalid kernel CPU duration: \(absoluteTime), timebase \(timebase.numer)/\(timebase.denom)")
+            return nil
+        }
+        return denominator.dividingFullWidth(product).quotient
+    }
 
     struct TaskInfoDetails {
         var cpuTime: UInt64 = 0
@@ -110,13 +129,16 @@ enum Libproc {
         return rc == size ? info : nil
     }
 
-    static func taskDetails(_ info: proc_taskinfo) -> TaskInfoDetails {
-        TaskInfoDetails(
-            cpuTime: info.pti_total_user &+ info.pti_total_system,
+    static func taskDetails(_ info: proc_taskinfo) -> TaskInfoDetails? {
+        guard let total = cpuNanoseconds(info.pti_total_user &+ info.pti_total_system),
+              let user = cpuNanoseconds(info.pti_threads_user),
+              let system = cpuNanoseconds(info.pti_threads_system) else { return nil }
+        return TaskInfoDetails(
+            cpuTime: total,
             threadCount: Int(info.pti_threadnum),
             runningThreadCount: Int(info.pti_numrunning),
-            threadUserTime: info.pti_threads_user,
-            threadSystemTime: info.pti_threads_system,
+            threadUserTime: user,
+            threadSystemTime: system,
             taskPolicy: info.pti_policy,
             residentSize: info.pti_resident_size,
             virtualSize: info.pti_virtual_size,
@@ -341,9 +363,9 @@ enum Libproc {
     }
 
     private static func socketEndpoint(_ socket: SocketInfo) -> String {
-        let local = socket.localPort == 0 ? socket.localAddress : "\(socket.localAddress):\(socket.localPort)"
+        let local = SocketInfo.endpoint(address: socket.localAddress, port: socket.localPort)
         guard socket.remotePort != 0 || !socket.remoteAddress.isEmpty else { return local }
-        let remote = socket.remotePort == 0 ? socket.remoteAddress : "\(socket.remoteAddress):\(socket.remotePort)"
+        let remote = SocketInfo.endpoint(address: socket.remoteAddress, port: socket.remotePort)
         return "\(local) -> \(remote)"
     }
 
@@ -546,6 +568,7 @@ enum Libproc {
             result.append(
                 ThreadInfo(
                     id: threadID,
+                    identifierSource: .libprocHandle,
                     name: fixedChars(info.pth_name),
                     cpuPercent: Double(info.pth_cpu_usage) / Double(TH_USAGE_SCALE) * 100.0,
                     cpuTime: info.pth_user_time &+ info.pth_system_time,
@@ -644,94 +667,40 @@ enum Libproc {
     static func strings(atPath path: String, minLength: Int = 3) -> [String] {
         guard let handle = FileHandle(forReadingAtPath: path) else { return [] }
         defer { try? handle.close() }
-        let chunkSize = 65_536 + 8
-        let overlap = UInt64(max(0, minLength - 1))
-        var result: [String] = []
+        var ascii: [UInt8] = []
+        var unicode: [UInt8] = []
+        var pendingLow: UInt8?
+        var asciiResults: [String] = []
+        var unicodeResults: [String] = []
 
+        // Preserve incomplete runs and UTF16 pairs across read boundaries.
         while true {
-            let data = handle.readData(ofLength: chunkSize)
+            let data = handle.readData(ofLength: 65_536)
             guard !data.isEmpty else { break }
-            result.append(contentsOf: scanBufferForStrings(Array(data), minLength: minLength))
-
-            if data.count == chunkSize, overlap > 0 {
-                let offset = handle.offsetInFile
-                handle.seek(toFileOffset: offset > overlap ? offset - overlap : 0)
+            for byte in data {
+                if isWindowsPrintable(byte), byte != 0x20 || !ascii.isEmpty {
+                    ascii.append(byte)
+                } else {
+                    appendASCIIString(ascii, minLength: minLength, result: &asciiResults)
+                    ascii.removeAll(keepingCapacity: true)
+                }
+                if let low = pendingLow {
+                    if byte == 0, isWindowsPrintable(low), low != 0x20 || !unicode.isEmpty {
+                        unicode.append(low)
+                        pendingLow = nil
+                    } else {
+                        appendASCIIString(unicode, minLength: minLength, result: &unicodeResults)
+                        unicode.removeAll(keepingCapacity: true)
+                        pendingLow = byte
+                    }
+                } else {
+                    pendingLow = byte
+                }
             }
         }
-        return result
-    }
-
-    private static func scanBufferForStrings(_ bytes: [UInt8], minLength: Int) -> [String] {
-        guard bytes.count >= minLength else { return [] }
-        var result: [String] = []
-        result.append(contentsOf: scanUTF16Strings(in: bytes, minLength: minLength))
-        result.append(contentsOf: scanASCIIStrings(in: bytes, minLength: minLength))
-        return result
-    }
-
-    private static func scanUTF16Strings(in bytes: [UInt8], minLength: Int) -> [String] {
-        var result: [String] = []
-        var sequenceStart: Int?
-        var index = 0
-
-        while index + 1 < bytes.count {
-            let low = bytes[index]
-            let high = bytes[index + 1]
-            if high == 0, isWindowsPrintable(low), low != 0x20 || sequenceStart != nil {
-                if sequenceStart == nil { sequenceStart = index }
-                index += 2
-                continue
-            }
-            if let start = sequenceStart {
-                appendUTF16String(bytes, from: start, to: index, minLength: minLength, result: &result)
-                sequenceStart = nil
-            }
-            index += 1
-        }
-        if let start = sequenceStart {
-            appendUTF16String(bytes, from: start, to: index, minLength: minLength, result: &result)
-        }
-        return result
-    }
-
-    private static func scanASCIIStrings(in bytes: [UInt8], minLength: Int) -> [String] {
-        var result: [String] = []
-        var current: [UInt8] = []
-        current.reserveCapacity(64)
-        for byte in bytes {
-            if isWindowsPrintable(byte), byte != 0x20 || !current.isEmpty {
-                current.append(byte)
-            } else {
-                appendASCIIString(current, minLength: minLength, result: &result)
-                current.removeAll(keepingCapacity: true)
-            }
-        }
-        appendASCIIString(current, minLength: minLength, result: &result)
-        return result
-    }
-
-    private static func appendUTF16String(
-        _ bytes: [UInt8],
-        from start: Int,
-        to end: Int,
-        minLength: Int,
-        result: inout [String]
-    ) {
-        guard end - start >= minLength * 2 else { return }
-        var lowBytes: [UInt8] = []
-        lowBytes.reserveCapacity((end - start) / 2)
-        var alphaCount = 0
-        var index = start
-        while index + 1 < end {
-            let low = bytes[index]
-            let high = bytes[index + 1]
-            guard high == 0, isWindowsPrintable(low) else { break }
-            if isASCIIAlpha(low) { alphaCount += 1 }
-            lowBytes.append(low)
-            index += 2
-        }
-        guard lowBytes.count >= minLength, alphaCount >= minLength else { return }
-        result.append(String(decoding: lowBytes, as: UTF8.self))
+        appendASCIIString(ascii, minLength: minLength, result: &asciiResults)
+        appendASCIIString(unicode, minLength: minLength, result: &unicodeResults)
+        return unicodeResults + asciiResults
     }
 
     private static func appendASCIIString(_ bytes: [UInt8], minLength: Int, result: inout [String]) {

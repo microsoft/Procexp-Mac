@@ -38,6 +38,8 @@ private actor SystemStatsDeltaState {
     var previousNetworkTime: TimeInterval?
     var previousDiskBytes: UInt64?
     var previousDiskTime: TimeInterval?
+    var networkIdentity: [String] = []
+    var diskIdentity: [String] = []
 
     func updateCPU(
         _ new: [(user: UInt32, system: UInt32, idle: UInt32, nice: UInt32)]
@@ -67,12 +69,32 @@ private actor SystemStatsDeltaState {
         return (avg, perCore)
     }
 
-    func updateNetwork(totalBytes: UInt64, now: TimeInterval) -> UInt64 {
-        updateRate(totalBytes: totalBytes, now: now, previousBytes: &previousNetworkBytes, previousTime: &previousNetworkTime)
+    func updateNetwork(totalBytes: UInt64?, now: TimeInterval, identity: [String] = []) -> UInt64 {
+        guard let totalBytes else {
+            previousNetworkBytes = nil
+            previousNetworkTime = nil
+            return 0
+        }
+        if networkIdentity != identity {
+            previousNetworkBytes = nil
+            previousNetworkTime = nil
+        }
+        networkIdentity = identity
+        return updateRate(totalBytes: totalBytes, now: now, previousBytes: &previousNetworkBytes, previousTime: &previousNetworkTime)
     }
 
-    func updateDisk(totalBytes: UInt64, now: TimeInterval) -> UInt64 {
-        updateRate(totalBytes: totalBytes, now: now, previousBytes: &previousDiskBytes, previousTime: &previousDiskTime)
+    func updateDisk(totalBytes: UInt64?, now: TimeInterval, identity: [String] = []) -> UInt64 {
+        guard let totalBytes else {
+            previousDiskBytes = nil
+            previousDiskTime = nil
+            return 0
+        }
+        if diskIdentity != identity {
+            previousDiskBytes = nil
+            previousDiskTime = nil
+        }
+        diskIdentity = identity
+        return updateRate(totalBytes: totalBytes, now: now, previousBytes: &previousDiskBytes, previousTime: &previousDiskTime)
     }
 
     private func updateRate(
@@ -101,34 +123,48 @@ private actor SystemStatsDeltaState {
 
 public final class SystemStatsProvider: SystemStatsProviding {
     private let state = SystemStatsDeltaState()
+    private struct CounterReading: Sendable {
+        var bytes: UInt64
+        var identity: [String]
+    }
 
     public init() {}
 
     public func stats() async -> SystemStats {
+        var unavailable: Set<SystemStats.Metric> = [.gpu]
         let cpuTicks = Self.readPerCoreCPUTicks()
+        if cpuTicks.isEmpty { unavailable.insert(.cpu) }
         let (cpuTotal, perCore) = await state.updateCPU(cpuTicks)
 
-        let mem = Self.readMemory()
+        let memory = Self.readMemory()
+        if memory == nil { unavailable.insert(.memory) }
+        let mem = memory ?? MemorySample()
         let swap = Self.readSwapUsed()
+        if swap == nil { unavailable.insert(.swap) }
 
         let now = ProcessInfo.processInfo.systemUptime
         let netTotal = Self.readTotalNetworkBytes()
         let netRate: UInt64
         if let netTotal {
             netRate = await state.updateNetwork(
-                totalBytes: netTotal,
-                now: now
+                totalBytes: netTotal.bytes,
+                now: now,
+                identity: netTotal.identity
             )
         } else {
             netRate = 0
+            _ = await state.updateNetwork(totalBytes: nil, now: now)
+            unavailable.insert(.network)
         }
 
         let diskTotal = Self.readTotalDiskBytes()
         let diskRate: UInt64
         if let diskTotal {
-            diskRate = await state.updateDisk(totalBytes: diskTotal, now: now)
+            diskRate = await state.updateDisk(totalBytes: diskTotal.bytes, now: now, identity: diskTotal.identity)
         } else {
             diskRate = 0
+            _ = await state.updateDisk(totalBytes: nil, now: now)
+            unavailable.insert(.disk)
         }
 
         return SystemStats(
@@ -138,13 +174,14 @@ public final class SystemStatsProvider: SystemStatsProviding {
             memoryTotal: mem.total,
             memoryWired: mem.wired,
             memoryCompressed: mem.compressed,
-            swapUsed: swap,
+            swapUsed: swap ?? 0,
             diskBytesPerSec: diskRate,
             networkBytesPerSec: netRate,
             gpuPercent: nil,              // provided by W9 GPUStatsProvider
             processCount: 0,             // filled by W1 sampling engine
             threadCount: 0,              // filled by W1 sampling engine
-            handleCount: 0               // filled by W1 sampling engine
+            handleCount: 0,              // filled by W1 sampling engine
+            unavailableMetrics: unavailable
         )
     }
 
@@ -156,9 +193,11 @@ public final class SystemStatsProvider: SystemStatsProviding {
         var cpuCount: natural_t = 0
         var infoArray: processor_info_array_t?
         var infoCount: mach_msg_type_number_t = 0
+        let host = mach_host_self()
+        defer { mach_port_deallocate(mach_task_self_, host) }
 
         let result = host_processor_info(
-            mach_host_self(),
+            host,
             PROCESSOR_CPU_LOAD_INFO,
             &cpuCount,
             &infoArray,
@@ -199,23 +238,25 @@ public final class SystemStatsProvider: SystemStatsProviding {
         var compressed: UInt64 = 0
     }
 
-    private static func readMemory() -> MemorySample {
+    private static func readMemory() -> MemorySample? {
         var sample = MemorySample()
         sample.total = readPhysicalMemory()
 
-        let pageSize = readPageSize()
+        guard sample.total > 0, let pageSize = readPageSize() else { return nil }
 
         var vmStats = vm_statistics64_data_t()
         var count = mach_msg_type_number_t(
             MemoryLayout<vm_statistics64_data_t>.stride / MemoryLayout<integer_t>.stride
         )
+        let host = mach_host_self()
+        defer { mach_port_deallocate(mach_task_self_, host) }
         let result = withUnsafeMutablePointer(to: &vmStats) { ptr -> kern_return_t in
             ptr.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { intPtr in
-                host_statistics64(mach_host_self(), HOST_VM_INFO64, intPtr, &count)
+                host_statistics64(host, HOST_VM_INFO64, intPtr, &count)
             }
         }
         guard result == KERN_SUCCESS else {
-            return sample
+            return nil
         }
 
         let wiredBytes = UInt64(vmStats.wire_count) * pageSize
@@ -229,10 +270,12 @@ public final class SystemStatsProvider: SystemStatsProviding {
         return sample
     }
 
-    private static func readPageSize() -> UInt64 {
+    private static func readPageSize() -> UInt64? {
         var pageSize: vm_size_t = 0
-        let result = host_page_size(mach_host_self(), &pageSize)
-        return result == KERN_SUCCESS ? UInt64(pageSize) : 4096
+        let host = mach_host_self()
+        defer { mach_port_deallocate(mach_task_self_, host) }
+        let result = host_page_size(host, &pageSize)
+        return result == KERN_SUCCESS && pageSize > 0 ? UInt64(pageSize) : nil
     }
 
     private static func readPhysicalMemory() -> UInt64 {
@@ -245,19 +288,19 @@ public final class SystemStatsProvider: SystemStatsProviding {
 
     // MARK: Swap
 
-    private static func readSwapUsed() -> UInt64 {
+    private static func readSwapUsed() -> UInt64? {
         var usage = xsw_usage()
         var len = MemoryLayout<xsw_usage>.size
         var mib: [Int32] = [CTL_VM, VM_SWAPUSAGE]
         let result = sysctl(&mib, u_int(mib.count), &usage, &len, nil, 0)
-        return result == 0 ? usage.xsu_used : 0
+        return result == 0 ? usage.xsu_used : nil
     }
 
     // MARK: Network
 
     /// Sums cumulative ibytes+obytes across all interfaces via NET_RT_IFLIST2.
     /// Returns nil if the interface list cannot be read.
-    private static func readTotalNetworkBytes() -> UInt64? {
+    private static func readTotalNetworkBytes() -> CounterReading? {
         var mib: [Int32] = [CTL_NET, PF_ROUTE, 0, 0, NET_RT_IFLIST2, 0]
 
         var len = 0
@@ -272,6 +315,7 @@ public final class SystemStatsProvider: SystemStatsProviding {
         guard ok else { return nil }
 
         var total: UInt64 = 0
+        var identity: [String] = []
         buffer.withUnsafeBytes { raw in
             guard let base = raw.baseAddress else { return }
             var offset = 0
@@ -284,26 +328,24 @@ public final class SystemStatsProvider: SystemStatsProviding {
                         .assumingMemoryBound(to: if_msghdr2.self)
                     let data = if2Ptr.pointee.ifm_data
                     total &+= UInt64(data.ifi_ibytes) &+ UInt64(data.ifi_obytes)
+                    identity.append(String(if2Ptr.pointee.ifm_index))
                 }
                 offset += msgLen
             }
         }
-        return total
+        return CounterReading(bytes: total, identity: identity.sorted())
     }
 
-    private static func readTotalDiskBytes() -> UInt64? {
-        var total: UInt64 = 0
-        var found = false
+    private static func readTotalDiskBytes() -> CounterReading? {
         for serviceName in ["IOBlockStorageDriver", "AppleAPFSMedia", "AppleAPFSVolume"] {
             if let bytes = readDiskBytes(matchingServiceClass: serviceName) {
-                total &+= bytes
-                found = true
+                return bytes
             }
         }
-        return found ? total : nil
+        return nil
     }
 
-    private static func readDiskBytes(matchingServiceClass name: String) -> UInt64? {
+    private static func readDiskBytes(matchingServiceClass name: String) -> CounterReading? {
         guard let matching = IOServiceMatching(name) else { return nil }
         var iterator: io_iterator_t = 0
         guard IOServiceGetMatchingServices(kIOMainPortDefault, matching, &iterator) == KERN_SUCCESS else {
@@ -313,16 +355,23 @@ public final class SystemStatsProvider: SystemStatsProviding {
 
         var total: UInt64 = 0
         var found = false
+        var identity: [String] = []
         var service = IOIteratorNext(iterator)
         while service != 0 {
             if let stats = registryStatistics(of: service), let bytes = diskBytes(from: stats) {
+                var entryID: UInt64 = 0
+                guard IORegistryEntryGetRegistryEntryID(service, &entryID) == KERN_SUCCESS else {
+                    IOObjectRelease(service)
+                    return nil
+                }
                 total &+= bytes
                 found = true
+                identity.append("\(name):\(entryID)")
             }
             IOObjectRelease(service)
             service = IOIteratorNext(iterator)
         }
-        return found ? total : nil
+        return found ? CounterReading(bytes: total, identity: identity.sorted()) : nil
     }
 
     private static func registryStatistics(of service: io_registry_entry_t) -> [String: Any]? {
@@ -335,14 +384,9 @@ public final class SystemStatsProvider: SystemStatsProviding {
     private static func diskBytes(from stats: [String: Any]) -> UInt64? {
         let readKeys = ["Bytes (Read)", "Bytes read from block device", "Bytes read by user"]
         let writeKeys = ["Bytes (Write)", "Bytes written to block device", "Bytes written by user"]
-        var found = false
-        var total: UInt64 = 0
-        for key in readKeys + writeKeys {
-            if let number = stats[key] as? NSNumber {
-                total &+= number.uint64Value
-                found = true
-            }
-        }
-        return found ? total : nil
+        let read = readKeys.lazy.compactMap { (stats[$0] as? NSNumber)?.uint64Value }.first
+        let written = writeKeys.lazy.compactMap { (stats[$0] as? NSNumber)?.uint64Value }.first
+        guard read != nil || written != nil else { return nil }
+        return (read ?? 0) &+ (written ?? 0)
     }
 }

@@ -5,8 +5,8 @@
 //  Process Explorer's System Information view describes *what* each resource is
 //  (CPU model, core layout, RAM, GPUs, disks) alongside the live graphs. macOS
 //  exposes this through `sysctl`, Metal (`MTLCopyAllDevices`) and Foundation's
-//  volume resource keys. Hardware doesn't change while the app runs, so the
-//  whole thing is gathered once via `HardwareInfo.current` and cached.
+//  volume resource keys. Fixed metadata is cached; volume and interface
+//  observations are refreshed while System Information is visible.
 //
 //  All stored state is value-type (Strings / Ints), so `HardwareInfo` is a
 //  trivially `Sendable`, cacheable snapshot.
@@ -15,8 +15,9 @@
 import Foundation
 import Metal
 import Darwin
+import ProcexpGraphs
 
-/// Immutable description of the machine's fixed hardware. Read once, cached.
+/// Hardware description with refreshable storage and network resources.
 struct HardwareInfo: Sendable {
 
     // MARK: Machine
@@ -33,6 +34,7 @@ struct HardwareInfo: Sendable {
     var logicalCores: Int             // hw.logicalcpu
     var performanceCores: Int?        // hw.perflevel0.physicalcpu (Apple Silicon)
     var efficiencyCores: Int?         // hw.perflevel1.physicalcpu (Apple Silicon)
+    var coreKinds: [CPUCoreKind]? = nil
     var packages: Int                 // hw.packages (sockets)
     var cpuFrequencyHz: UInt64?       // hw.cpufrequency (0/absent on Apple Silicon)
     var cacheLineSize: UInt64?
@@ -57,7 +59,7 @@ struct HardwareInfo: Sendable {
     struct GPUInfo: Sendable, Identifiable {
         var id: Int
         var name: String
-        var vram: UInt64?             // recommendedMaxWorkingSetSize
+        var recommendedWorkingSetBudget: UInt64?
         var unifiedMemory: Bool       // hasUnifiedMemory
         var lowPower: Bool
         var removable: Bool
@@ -79,9 +81,7 @@ struct HardwareInfo: Sendable {
         var isRemovable: Bool?
         var isEjectable: Bool?
         var isReadOnly: Bool?
-        /// Approximate media type. Internal Apple Silicon storage is always
-        /// flash, so it is reported as "SSD"; probing rotational media on Intel
-        /// externally is not attempted here.
+        /// Unknown unless an actual media observation is available.
         var mediaType: String
     }
 
@@ -99,6 +99,14 @@ struct HardwareInfo: Sendable {
 
     /// The machine's hardware, gathered on first access and reused thereafter.
     static let current: HardwareInfo = HardwareInfo.gather()
+
+    func refreshingResources() -> HardwareInfo {
+        var updated = self
+        updated.bootVolume = Self.gatherBootVolume()
+        updated.volumes = Self.gatherVolumes(bootVolume: updated.bootVolume)
+        updated.networkInterfaces = Self.gatherNetworkInterfaces()
+        return updated
+    }
 
     // MARK: - Derived display helpers
 
@@ -138,6 +146,7 @@ private extension HardwareInfo {
         let logical = Int(sysctlUInt("hw.logicalcpu") ?? UInt64(processInfo.activeProcessorCount))
         let pCores = sysctlUInt("hw.perflevel0.physicalcpu").map(Int.init)
         let eCores = sysctlUInt("hw.perflevel1.physicalcpu").map(Int.init)
+        let coreKinds = pCores != nil && eCores != nil ? CPUCoreTopology.coreKinds() : nil
         let packages = Int(sysctlUInt("hw.packages") ?? 1)
         let freq = sysctlUInt("hw.cpufrequency").flatMap { $0 == 0 ? nil : $0 }
         let cacheLine = sysctlUInt("hw.cachelinesize")
@@ -169,6 +178,7 @@ private extension HardwareInfo {
             logicalCores: logical,
             performanceCores: pCores,
             efficiencyCores: eCores,
+            coreKinds: coreKinds,
             packages: max(packages, 1),
             cpuFrequencyHz: freq,
             cacheLineSize: cacheLine,
@@ -202,11 +212,11 @@ private extension HardwareInfo {
     static func gatherGPUs() -> [GPUInfo] {
         let devices = MTLCopyAllDevices()
         return devices.enumerated().map { index, device in
-            let vram = device.recommendedMaxWorkingSetSize
+            let budget = device.recommendedMaxWorkingSetSize
             return GPUInfo(
                 id: index,
                 name: device.name,
-                vram: vram == 0 ? nil : vram,
+                recommendedWorkingSetBudget: budget == 0 ? nil : budget,
                 unifiedMemory: device.hasUnifiedMemory,
                 lowPower: device.isLowPower,
                 removable: device.isRemovable,
@@ -280,11 +290,6 @@ private extension HardwareInfo {
         let total = UInt64(values.volumeTotalCapacity ?? 0)
         let available = UInt64(values.volumeAvailableCapacity ?? 0)
 
-        // Apple Silicon internal storage is always flash. Report "SSD" there;
-        // otherwise leave the type generic rather than probe IOKit media.
-        let arch = sysctlString("hw.machine") ?? ""
-        let mediaType = arch.hasPrefix("arm") ? "SSD (Flash)" : "Internal"
-
         return VolumeInfo(
             name: name,
             totalCapacity: total,
@@ -294,7 +299,7 @@ private extension HardwareInfo {
             isRemovable: values.volumeIsRemovable,
             isEjectable: values.volumeIsEjectable,
             isReadOnly: values.volumeIsReadOnly,
-            mediaType: mediaType
+            mediaType: "Unknown"
         )
     }
 

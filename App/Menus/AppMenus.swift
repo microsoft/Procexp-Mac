@@ -1,9 +1,6 @@
 //
 //  AppMenus.swift
-//  R1 — Native menu bar mirroring the Windows Process Explorer menu tree
-//  (see docs/UX_OVERHAUL_PLAN.md). Real commands are wired to `AppModel` /
-//  `ActionCoordinator`; features without a backing implementation yet are
-//  enabled no-op stubs, marked `// STUB`.
+//  Native menu commands backed by AppModel and ActionCoordinator.
 //
 
 import SwiftUI
@@ -15,32 +12,19 @@ import ProcexpActions
 struct AppMenuCommands: Commands {
     let model: AppModel
 
-    /// Windows "Del" is the forward-delete key; using `.deleteForward` avoids
-    /// hijacking Backspace while editing the search field.
-    private static let killKey = KeyEquivalent.deleteForward
     /// F5 — the Refresh Now accelerator.
     private static let f5 = KeyEquivalent(Character(UnicodeScalar(0xF708)!))
 
     var body: some Commands {
-        // FILE — Run / Save / Save As / Shutdown.
+        // FILE — Run / Export.
         CommandGroup(replacing: .newItem) {
             Button("Run…") { model.showRunSheet = true }
                 .keyboardShortcut("r", modifiers: .command)
 
             Divider()
 
-            Button("Save") { model.saveRequestToken += 1 }
+            Button("Export Process List…") { model.saveRequestToken += 1 }
                 .keyboardShortcut("s", modifiers: .command)
-            Button("Save As…") { model.saveRequestToken += 1 }
-                .keyboardShortcut("s", modifiers: [.command, .shift])
-
-            Divider()
-
-            Menu("Shutdown") {
-                Button("Log Off…") { NSWorkspaceStub.beep() }        // STUB
-                Button("Restart…") { NSWorkspaceStub.beep() }        // STUB
-                Button("Shut Down…") { NSWorkspaceStub.beep() }      // STUB
-            }
         }
 
         // OPTIONS.
@@ -49,13 +33,13 @@ struct AppMenuCommands: Commands {
         }
 
         // VIEW.
-        CommandMenu("View") {
+        CommandGroup(replacing: .toolbar) {
             ViewMenu(model: model, f5: Self.f5)
         }
 
         // PROCESS.
         CommandMenu("Process") {
-            ProcessMenu(model: model, killKey: Self.killKey)
+            ProcessMenu(model: model)
         }
 
         // FIND.
@@ -70,7 +54,7 @@ private struct FindMenu: View {
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        Button("Find Handle or DLL…") { openWindow(id: FindHandleDLLWindow.id) }
+        Button("Find Mapped Files or File Descriptors…") { openWindow(id: FindHandleDLLWindow.id) }
             .keyboardShortcut("f", modifiers: .command)
         Button("Filter Processes…") { model.focusSearchToken += 1 }
             .keyboardShortcut("f", modifiers: [.command, .shift])
@@ -84,8 +68,9 @@ private struct OptionsMenu: View {
 
     var body: some View {
         Toggle("Verify Image Signatures", isOn: $model.verifySignatures)
-        Toggle("Confirm Kill", isOn: $model.confirmBeforeKill)
+        Toggle("Confirm Force Quit", isOn: $model.confirmBeforeKill)
         Toggle("Always On Top", isOn: $model.alwaysOnTop)
+        Toggle("Show CPU in Menu Bar", isOn: $model.showMenuBarGraph)
 
         Divider()
 
@@ -95,13 +80,6 @@ private struct OptionsMenu: View {
             }
         }
 
-        Divider()
-
-        // STUBS — no backing implementation yet.
-        Button("Run At Logon") { NSWorkspaceStub.beep() }
-        Button("Hide When Minimized") { NSWorkspaceStub.beep() }
-        Button("Allow Only One Instance") { NSWorkspaceStub.beep() }
-        Button("Highlight Relocated DLLs") { NSWorkspaceStub.beep() }
     }
 }
 
@@ -120,16 +98,16 @@ private struct ViewMenu: View {
             .keyboardShortcut("l", modifiers: .command)
 
         Menu("Lower Pane View") {
-            Button("DLLs") {
+            Button("Mapped Images / Files") {
                 model.lowerPaneMode = .modules
                 model.showLowerPane = true
             }
             .keyboardShortcut("d", modifiers: .command)
-            Button("Handles") {
+            Button("File Descriptors") {
                 model.lowerPaneMode = .handles
                 model.showLowerPane = true
             }
-            .keyboardShortcut("h", modifiers: .command)
+            .keyboardShortcut("h", modifiers: [.command, .shift])
             Button("Threads") {
                 model.lowerPaneMode = .threads
                 model.showLowerPane = true
@@ -176,10 +154,6 @@ private struct ViewMenu: View {
         Button("Save Column Set…") { model.showSaveColumnSetSheet = true }
         Button("Organize Column Sets…") { model.showOrganizeColumnSetsSheet = true }
 
-        Divider()
-
-        // STUBS.
-        Button("Show Processes From All Users") { NSWorkspaceStub.beep() }
     }
 
     private func speedLabel(_ seconds: TimeInterval) -> String {
@@ -191,23 +165,20 @@ private struct ViewMenu: View {
 
 private struct ProcessMenu: View {
     @Bindable var model: AppModel
-    let killKey: KeyEquivalent
     @Environment(\.openWindow) private var openWindow
 
     private let priorities: [(String, Int32)] = [
-        ("Idle (19)", 19),
-        ("Below Normal (10)", 10),
-        ("Normal (0)", 0),
-        ("Above Normal (-10)", -10),
-        ("High (-20)", -20),
+        ("19", 19),
+        ("10", 10),
+        ("0 (default)", 0),
+        ("-10", -10),
+        ("-20", -20),
     ]
 
     var body: some View {
-        Button("Kill Process") { request(.kill) }
-            .keyboardShortcut(killKey, modifiers: [])
+        Button("Force Quit Process") { request(.kill) }
             .disabled(model.selection == nil)
-        Button("Kill Process Tree") { request(.killTree) }
-            .keyboardShortcut(killKey, modifiers: .shift)
+        Button("Force Quit Process Tree") { request(.killTree) }
             .disabled(model.selection == nil)
 
         Button(suspendTitle) { toggleSuspend() }
@@ -215,7 +186,7 @@ private struct ProcessMenu: View {
         Button("Restart") { request(.restart) }
             .disabled(model.selection == nil)
 
-        Menu("Set Priority") {
+        Menu("Set Nice Value") {
             ForEach(priorities, id: \.0) { title, nice in
                 Button(title) {
                     if let pid = model.selection {
@@ -224,6 +195,7 @@ private struct ProcessMenu: View {
                 }
             }
         }
+        .help("POSIX nice values: lower values request more CPU scheduling preference and may require elevated privileges. This does not set a QoS class.")
         .disabled(model.selection == nil)
 
         Button("Bring to Front") { request(.bringToFront) }
@@ -266,9 +238,4 @@ private struct ProcessMenu: View {
         let suspended = model.snapshot.info(pid)?.flags.contains(.suspended) ?? false
         model.actionCoordinator.request(suspended ? .resume : .suspend, pid: pid, model: model)
     }
-}
-
-/// A no-op signal for enabled-but-unimplemented menu stubs.
-private enum NSWorkspaceStub {
-    static func beep() { NSSound.beep() }
 }

@@ -162,6 +162,7 @@ public struct ProcessRecordDTO: Codable, Sendable {
 // MARK: - SystemStats
 
 public struct SystemStatsDTO: Codable, Sendable {
+    public var unavailableMetrics: Set<SystemStats.Metric>?
     public var cpuTotalPercent: Double
     public var perCoreCPUPercent: [Double]
     public var memoryUsed: UInt64
@@ -177,6 +178,7 @@ public struct SystemStatsDTO: Codable, Sendable {
     public var handleCount: Int
 
     public init(_ s: SystemStats) {
+        unavailableMetrics = s.unavailableMetrics
         cpuTotalPercent = s.cpuTotalPercent
         perCoreCPUPercent = s.perCoreCPUPercent
         memoryUsed = s.memoryUsed
@@ -206,7 +208,8 @@ public struct SystemStatsDTO: Codable, Sendable {
             gpuPercent: gpuPercent,
             processCount: processCount,
             threadCount: threadCount,
-            handleCount: handleCount
+            handleCount: handleCount,
+            unavailableMetrics: unavailableMetrics ?? []
         )
     }
 }
@@ -248,6 +251,7 @@ public struct ProcessSnapshotDTO: Codable, Sendable {
 
 public struct ThreadInfoDTO: Codable, Sendable {
     public var id: UInt64
+    public var identifierSource: ThreadIdentifierSource?
     public var name: String
     public var cpuPercent: Double
     public var cpuTime: UInt64
@@ -256,16 +260,17 @@ public struct ThreadInfoDTO: Codable, Sendable {
     public var state: String
     public var startAddress: UInt64?
     public var startSymbol: String?
-    public var currentPriority: Int32
-    public var basePriority: Int32
-    public var maxPriority: Int32
-    public var schedulerPolicy: Int32
-    public var sleepTimeSeconds: Int32
-    public var flags: Int32
+    public var currentPriority: Int32?
+    public var basePriority: Int32?
+    public var maxPriority: Int32?
+    public var schedulerPolicy: Int32?
+    public var sleepTimeSeconds: Int32?
+    public var flags: Int32?
     public var dispatchQueueAddress: UInt64?
 
     public init(_ t: ThreadInfo) {
         id = t.id
+        identifierSource = t.identifierSource
         name = t.name
         cpuPercent = t.cpuPercent
         cpuTime = t.cpuTime
@@ -284,15 +289,17 @@ public struct ThreadInfoDTO: Codable, Sendable {
     }
 
     public init(
-        id: UInt64, name: String = "", cpuPercent: Double, cpuTime: UInt64,
+        id: UInt64, identifierSource: ThreadIdentifierSource = .unknown,
+        name: String = "", cpuPercent: Double, cpuTime: UInt64,
         userTime: UInt64 = 0, kernelTime: UInt64 = 0, state: String,
         startAddress: UInt64? = nil, startSymbol: String? = nil,
-        currentPriority: Int32 = 0, basePriority: Int32,
-        maxPriority: Int32 = 0, schedulerPolicy: Int32 = 0,
-        sleepTimeSeconds: Int32 = 0, flags: Int32 = 0,
+        currentPriority: Int32? = nil, basePriority: Int32? = nil,
+        maxPriority: Int32? = nil, schedulerPolicy: Int32? = nil,
+        sleepTimeSeconds: Int32? = nil, flags: Int32? = nil,
         dispatchQueueAddress: UInt64? = nil
     ) {
         self.id = id
+        self.identifierSource = identifierSource
         self.name = name
         self.cpuPercent = cpuPercent
         self.cpuTime = cpuTime
@@ -313,6 +320,7 @@ public struct ThreadInfoDTO: Codable, Sendable {
     public var model: ThreadInfo {
         ThreadInfo(
             id: id,
+            identifierSource: identifierSource ?? .unknown,
             name: name,
             cpuPercent: cpuPercent,
             cpuTime: cpuTime,

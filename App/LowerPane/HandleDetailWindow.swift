@@ -88,7 +88,7 @@ struct HandleDetailView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .frame(minWidth: 420, minHeight: 240)
-        .navigationTitle("Handle \(id.fd)")
+        .navigationTitle("File Descriptor \(id.fd)")
         .onExitCommand { dismiss() }
         .background(EscapeKeyMonitor { dismiss() })
     }
@@ -99,7 +99,7 @@ struct HandleDetailView: View {
                 .resizable()
                 .frame(width: 36, height: 36)
             VStack(alignment: .leading, spacing: 2) {
-                Text("Handle \(id.fd) — \(kindTitle)")
+                Text("File Descriptor \(id.fd) — \(kindTitle)")
                     .font(.title3).bold()
                 Text(id.name.isEmpty ? "(no name)" : id.name)
                     .font(.callout)

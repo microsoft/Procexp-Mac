@@ -15,7 +15,7 @@ actor CPUDeltaTracker {
     /// Cumulative CPU time (user+system, nanoseconds) at the previous sample.
     private var previousCPU: [ProcessID: UInt64] = [:]
     /// Monotonic wall-clock (nanoseconds) at the previous sample.
-    private var previousWallNanos: UInt64 = 0
+    private var previousWallNanos: UInt64?
 
     /// Given the current cumulative CPU times and the current wall clock,
     /// return the per-process CPU percentage where `100.0 == one busy core`.
@@ -27,9 +27,9 @@ actor CPUDeltaTracker {
         var result: [ProcessID: Double] = [:]
         result.reserveCapacity(current.count)
 
-        let wallDelta = previousWallNanos == 0 ? 0 : wallNanos &- previousWallNanos
+        let wallDelta = previousWallNanos.flatMap { wallNanos > $0 ? wallNanos - $0 : nil }
         for (id, cpu) in current {
-            if wallDelta > 0, let prev = previousCPU[id], cpu >= prev {
+            if let wallDelta, let prev = previousCPU[id], cpu >= prev {
                 let cpuDelta = cpu - prev
                 result[id] = Double(cpuDelta) / Double(wallDelta) * 100.0
             } else {
@@ -45,6 +45,6 @@ actor CPUDeltaTracker {
     /// Forget all accumulated state (e.g. when a fresh stream starts).
     func reset() {
         previousCPU.removeAll(keepingCapacity: true)
-        previousWallNanos = 0
+        previousWallNanos = nil
     }
 }

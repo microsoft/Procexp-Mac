@@ -175,6 +175,16 @@ private final class InstantTableTooltip {
         container.addSubview(label)
     }
 
+    deinit {
+        guard let timer = visibilityTimer else { return }
+        let window = window
+        // Deinitializers may run off-main; dispose AppKit resources on their actor.
+        Task { @MainActor in
+            timer.invalidate()
+            window?.orderOut(nil)
+        }
+    }
+
     func show(text: String, near event: NSEvent, from view: NSView) {
         guard let sourceWindow = view.window else { return }
         sourceView = view

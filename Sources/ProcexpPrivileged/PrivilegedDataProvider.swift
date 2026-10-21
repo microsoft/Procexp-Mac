@@ -31,7 +31,7 @@ public final class PrivilegedDataProvider: PrivilegedSampling, @unchecked Sendab
     public init() {}
 
     public var capabilities: ProviderCapabilities {
-        [.crossUser, .accurateCPU, .threadStacks, .fullEnvironment, .modules]
+        [.crossUser, .accurateCPU, .fullEnvironment, .modules]
     }
 
     // MARK: - Helper lifecycle (SMAppService)
@@ -44,14 +44,16 @@ public final class PrivilegedDataProvider: PrivilegedSampling, @unchecked Sendab
         return service.status == .enabled
     }
 
+    public static func helperRequiresApproval() -> Bool {
+        SMAppService.daemon(plistName: HelperConstants.daemonPlistName).status == .requiresApproval
+    }
+
     public static func installHelper() async throws {
         let service = SMAppService.daemon(plistName: HelperConstants.daemonPlistName)
         do {
             try service.register()
         } catch {
-            // Ad-hoc signed builds cannot register a launchd daemon; report a
-            // clean, typed failure rather than propagating the raw SM error.
-            throw ProviderError.helperUnavailable
+            throw ProviderError.underlying("Helper registration failed: \(error.localizedDescription)")
         }
     }
 
@@ -60,7 +62,7 @@ public final class PrivilegedDataProvider: PrivilegedSampling, @unchecked Sendab
         do {
             try await service.unregister()
         } catch {
-            throw ProviderError.helperUnavailable
+            throw ProviderError.underlying("Helper removal failed: \(error.localizedDescription)")
         }
     }
 
@@ -144,13 +146,13 @@ public final class PrivilegedDataProvider: PrivilegedSampling, @unchecked Sendab
 
     public func setNice(_ id: ProcessID, to nice: Int32) async throws {
         try await callVoid { proxy, reply in
-            proxy.setNice(pid: id.pid, nice: nice, withReply: reply)
+            proxy.setNice(pid: id.pid, startTime: id.startTime, nice: nice, withReply: reply)
         }
     }
 
     private func sendSignal(_ id: ProcessID, _ sig: Int32) async throws {
         try await callVoid { proxy, reply in
-            proxy.sendSignal(pid: id.pid, signal: sig, withReply: reply)
+            proxy.sendSignal(pid: id.pid, startTime: id.startTime, signal: sig, withReply: reply)
         }
     }
 

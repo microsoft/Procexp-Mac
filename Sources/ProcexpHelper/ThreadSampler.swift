@@ -81,12 +81,12 @@ enum ThreadSampler {
             var cpuTime = userTime &+ kernelTime
             var runState = basic.run_state
             var name = ""
-            var currentPriority: Int32 = 0
-            var basePriority: Int32 = 0
-            var maxPriority: Int32 = 0
-            var schedulerPolicy: Int32 = 0
-            var sleepTimeSeconds: Int32 = 0
-            var flags: Int32 = 0
+            var currentPriority: Int32?
+            var basePriority: Int32?
+            var maxPriority: Int32?
+            var schedulerPolicy = basic.policy
+            var sleepTimeSeconds = basic.sleep_time
+            var flags = basic.flags
 
             var extended = thread_extended_info_data_t()
             var eCount = extendedCount
@@ -118,14 +118,15 @@ enum ThreadSampler {
                     thread_info(thread, thread_flavor_t(THREAD_IDENTIFIER_INFO), $0, &iCount)
                 }
             }
-            let tid: UInt64 = ikr == KERN_SUCCESS ? idInfo.thread_id : UInt64(i)
-            let dispatchQueueAddress = ikr == KERN_SUCCESS && idInfo.dispatch_qaddr != 0
+            guard ikr == KERN_SUCCESS, idInfo.thread_id != 0 else { continue }
+            let dispatchQueueAddress = idInfo.dispatch_qaddr != 0
                 ? idInfo.dispatch_qaddr
                 : nil
 
             result.append(
                 ThreadInfoDTO(
-                    id: tid,
+                    id: idInfo.thread_id,
+                    identifierSource: .machThreadID,
                     name: name,
                     cpuPercent: cpuPercent,
                     cpuTime: cpuTime,
@@ -133,8 +134,8 @@ enum ThreadSampler {
                     kernelTime: kernelTime,
                     state: stateString(runState),
                     currentPriority: currentPriority,
-                    basePriority: basePriority
-                    , maxPriority: maxPriority,
+                    basePriority: basePriority,
+                    maxPriority: maxPriority,
                     schedulerPolicy: schedulerPolicy,
                     sleepTimeSeconds: sleepTimeSeconds,
                     flags: flags,

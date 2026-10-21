@@ -138,7 +138,7 @@ struct ProcexpModelTests {
         #expect(Column.supportedOnMac.contains(.pid))
     }
 
-    @Test("Lower-pane column defaults mirror Windows visible defaults")
+    @Test("Lower-pane column defaults include supported visible columns")
     func lowerPaneColumnDefaults() {
         #expect(ModuleColumn.defaultColumns == [.name, .description, .company, .path])
         #expect(HandleColumn.defaultColumns == [.kind, .name, .fd])
@@ -147,7 +147,7 @@ struct ProcexpModelTests {
         #expect(ThreadColumn.requiredColumns == [.tid])
         #expect(ThreadColumn.defaultColumns == [
             .state, .tid, .userTime, .kernelTime, .cpu, .cpuTime,
-            .startAddress, .basePriority, .currentPriority,
+            .basePriority, .currentPriority,
         ])
     }
 
@@ -163,12 +163,12 @@ struct ProcexpModelTests {
 
     @Test("Lower-pane flag formatters include names and raw values")
     func lowerPaneFlagFormatters() {
-        #expect(FileDescriptorFlagFormatter.access(0) == "Read (0x0)")
-        #expect(FileDescriptorFlagFormatter.access(1) == "Write (0x1)")
-        #expect(FileDescriptorFlagFormatter.access(2) == "Read/Write (0x2)")
+        #expect(FileDescriptorFlagFormatter.access(0) == "0x0")
+        #expect(FileDescriptorFlagFormatter.access(1) == "Read (0x1)")
+        #expect(FileDescriptorFlagFormatter.access(2) == "Write (0x2)")
         #expect(FileDescriptorFlagFormatter.access(7) == "Read/Write, Non-blocking (0x7)")
         #expect(FileDescriptorFlagFormatter.access(0x10007) == "Read/Write, Non-blocking (0x10007)")
-        #expect(FileDescriptorFlagFormatter.access(0x0100_0002) == "Read/Write, Close-on-exec (0x1000002)")
+        #expect(FileDescriptorFlagFormatter.access(0x0100_0002) == "Write, Close-on-exec (0x1000002)")
         #expect(FileDescriptorFlagFormatter.access(nil) == "")
         #expect(FileDescriptorFlagFormatter.status(0x6) == "Close-on-exec, Guarded (0x6)")
         #expect(FileDescriptorFlagFormatter.status(nil) == "")

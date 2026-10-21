@@ -15,7 +15,7 @@ private struct ProcessSampleOutcome: Sendable {
 
 extension AppModel {
     private static let sampleDurationSeconds = 10
-    private static let sampleExecutablePath = "/usr/bin/sample"
+    nonisolated private static let sampleExecutablePath = "/usr/bin/sample"
 
     func sampleSelectedProcess() {
         guard let pid = selection else { return }
@@ -117,7 +117,7 @@ extension AppModel {
 
         let baseMessage: String
         if isPermissionFailure(output: output) {
-            baseMessage = "macOS denied sampling \(processName) (PID \(pid)). Try running Process Explorer with appropriate permissions, sampling a process owned by your user, or adding a privileged-helper capture path. System Integrity Protection may still prevent sampling protected processes."
+            baseMessage = "macOS denied sampling \(processName) (PID \(pid)). Sampling uses /usr/bin/sample with the current user's credentials; the privileged helper is not used for sampling. Try a process owned by your user. System Integrity Protection may still prevent sampling protected processes."
         } else if !FileManager.default.fileExists(atPath: destinationPath), task.terminationStatus == 0 {
             baseMessage = "sample reported success, but no output file was written at:\n\n\(destinationPath)"
         } else {

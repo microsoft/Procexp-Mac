@@ -74,7 +74,7 @@ public final class HistoryGraphView: NSView {
             drawGrid(in: bounds)
         }
 
-        let denom = maxValue > 0 ? maxValue : 1
+        let denom = maxValue.isFinite && maxValue > 0 ? maxValue : 1
         for (index, samples) in series.enumerated() {
             let color = seriesColors.indices.contains(index)
                 ? seriesColors[index]
@@ -115,25 +115,23 @@ public final class HistoryGraphView: NSView {
             return NSPoint(x: x, y: y)
         }
 
-        // Faint fill under the line for the primary look.
-        let fill = NSBezierPath()
-        fill.move(to: NSPoint(x: bounds.minX, y: bounds.minY))
-        for index in samples.indices {
-            fill.line(to: point(at: index))
-        }
-        fill.line(to: NSPoint(x: bounds.maxX, y: bounds.minY))
-        fill.close()
-        NSColor(RGBA(r: color.r, g: color.g, b: color.b, a: 0.20)).setFill()
-        fill.fill()
+        // Unavailable samples retain their time slot without connecting across the gap.
+        for segment in samples.indices.split(whereSeparator: { !samples[$0].isFinite }) {
+            guard let first = segment.first, let last = segment.last, first != last else { continue }
+            let fill = NSBezierPath()
+            fill.move(to: NSPoint(x: point(at: first).x, y: bounds.minY))
+            for index in segment { fill.line(to: point(at: index)) }
+            fill.line(to: NSPoint(x: point(at: last).x, y: bounds.minY))
+            fill.close()
+            NSColor(RGBA(r: color.r, g: color.g, b: color.b, a: 0.20)).setFill()
+            fill.fill()
 
-        // Line stroke.
-        let line = NSBezierPath()
-        line.lineWidth = 1
-        line.move(to: point(at: 0))
-        for index in samples.indices.dropFirst() {
-            line.line(to: point(at: index))
+            let line = NSBezierPath()
+            line.lineWidth = 1
+            line.move(to: point(at: first))
+            for index in segment.dropFirst() { line.line(to: point(at: index)) }
+            NSColor(color).setStroke()
+            line.stroke()
         }
-        NSColor(color).setStroke()
-        line.stroke()
     }
 }

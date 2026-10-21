@@ -40,13 +40,13 @@ final class HelperService: NSObject, ProcexpHelperProtocol {
             Self.encodeReply(dtos, reply)
             return
         }
-        // Fall back to the unprivileged count-only stubs when the task port is
+        // Fall back to unprivileged thread details when the task port is
         // unobtainable (e.g. task_for_pid denied to root under ad-hoc signing).
         let provider = self.provider
         Task {
             do {
-                let stubs = try await provider.threads(of: ProcessID(pid: pid, startTime: startTime))
-                Self.encodeReply(stubs.map(ThreadInfoDTO.init), reply)
+                let threads = try await provider.threads(of: ProcessID(pid: pid, startTime: startTime))
+                Self.encodeReply(threads.map(ThreadInfoDTO.init), reply)
             } catch {
                 reply(nil, Self.map(error))
             }
@@ -113,7 +113,9 @@ final class HelperService: NSObject, ProcexpHelperProtocol {
 
     // MARK: - Actions (root => any process)
 
-    func sendSignal(pid: Int32, signal: Int32, withReply reply: @escaping (Error?) -> Void) {
+    func sendSignal(pid: Int32, startTime: UInt64, signal: Int32, withReply reply: @escaping (Error?) -> Void) {
+        do { try ProcessLifetime.validateForControl(ProcessID(pid: pid, startTime: startTime)) }
+        catch { reply(Self.map(error)); return }
         if Darwin.kill(pid, signal) != 0 {
             reply(Self.errnoError(errno))
         } else {
@@ -121,11 +123,15 @@ final class HelperService: NSObject, ProcexpHelperProtocol {
         }
     }
 
-    func setNice(pid: Int32, nice: Int32, withReply reply: @escaping (Error?) -> Void) {
+    func setNice(pid: Int32, startTime: UInt64, nice: Int32, withReply reply: @escaping (Error?) -> Void) {
+        do { try ProcessLifetime.validateForControl(ProcessID(pid: pid, startTime: startTime)) }
+        catch { reply(Self.map(error)); return }
         errno = 0
         let rc = setpriority(PRIO_PROCESS, id_t(pid), nice)
-        if rc == -1 && errno != 0 {
-            reply(Self.errnoError(errno))
+        if rc == -1 {
+            reply(errno == 0
+                ? HelperError.make(.underlying, "setpriority failed without an OS error.")
+                : Self.errnoError(errno))
         } else {
             reply(nil)
         }

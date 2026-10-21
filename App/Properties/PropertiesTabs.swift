@@ -43,7 +43,9 @@ private struct InfoRow: View {
         GridRow {
             Text(label)
                 .foregroundStyle(.secondary)
+                .multilineTextAlignment(.trailing)
                 .frame(width: propertiesLabelWidth, alignment: .trailing)
+                .fixedSize(horizontal: false, vertical: true)
                 .gridColumnAlignment(.trailing)
             TruncatedValue(text: value, mono: mono)
         }
@@ -335,7 +337,7 @@ struct ImageTab: View {
                 Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 3) {
                     InfoRow(label: "Version", value: record.version ?? "")
                     if let build = detail.buildTime {
-                        InfoRow(label: "Build Time", value: build)
+                        InfoRow(label: "Executable Modified", value: build)
                     }
                     InfoScrollRow(label: "Path", value: record.executablePath ?? "")
                     if let autostart = detail.autostartLocation, !autostart.isEmpty {
@@ -351,7 +353,7 @@ struct ImageTab: View {
                     InfoRow(label: "User", value: record.userName ?? String(record.uid))
                     InfoRow(label: "Started", value: ByteFormat.dateTime(record.startTimeDate))
                     if let arch = detail.imageArch {
-                        InfoRow(label: "Image Type", value: arch)
+                        InfoRow(label: "Executable Architectures", value: arch)
                     }
                     InfoRow(label: "Mitigations", value: mitigationsText)
                 }
@@ -371,8 +373,9 @@ struct ImageTab: View {
                 Text(record.displayDescription?.isEmpty == false
                      ? record.displayDescription! : record.name)
                     .font(.title3).bold()
-                Text(record.companyName ?? "")
+                Text(record.companyName.map { "Organization (inferred): \($0)" } ?? "")
                     .foregroundStyle(.secondary)
+                    .help("Bundle identifier: \(record.bundleIdentifier ?? "unavailable"). The organization is inferred, not a verified publisher.")
                 Text(record.version.map { "Version \($0)" } ?? "")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -386,10 +389,10 @@ struct ImageTab: View {
     @ViewBuilder private var buttonRow: some View {
         HStack(spacing: 8) {
             Button("Bring to Front") {
-                model.actionCoordinator.request(.bringToFront, pid: pid, model: model)
+                model.actionCoordinator.request(.bringToFront, pid: pid, model: model, presentation: .properties(pid))
             }
-            Button("Kill Process") {
-                model.actionCoordinator.request(.kill, pid: pid, model: model)
+            Button("Force Quit Process") {
+                model.actionCoordinator.request(.kill, pid: pid, model: model, presentation: .properties(pid))
             }
             Button {
                 guard let path = record.executablePath, !path.isEmpty else { return }
@@ -414,7 +417,7 @@ struct ImageTab: View {
             }
             .disabled(!detail.canCheckVirusTotal)
 
-            Button("Explore") { reveal() }
+            Button("Reveal in Finder") { reveal() }
                 .disabled((record.executablePath ?? "").isEmpty)
         }
     }
@@ -428,9 +431,13 @@ struct ImageTab: View {
 
     private var mitigationsText: String {
         var items: [String] = []
-        if record.flags.contains(.sandboxed) { items.append("Sandboxed") }
-        if record.flags.contains(.platformBinary) { items.append("Platform Binary") }
-        if detail.signature?.isNotarized == true { items.append("Hardened Runtime") }
+        if detail.securityCode?.appSandboxEntitlement == true || record.flags.contains(.sandboxed) {
+            items.append("Sandboxed")
+        }
+        if detail.signature?.isPlatformBinary == true || record.flags.contains(.platformBinary) {
+            items.append("Platform Binary")
+        }
+        if detail.securityCode?.hardenedRuntime == true { items.append("Hardened Runtime") }
         return items.isEmpty ? "None detected" : items.joined(separator: ", ")
     }
 
@@ -447,39 +454,42 @@ struct SignatureTab: View {
     @Bindable var detail: PropertiesDetail
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if let sig = detail.signature {
-                Section(title: "Code Signature") {
-                    Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 10, verticalSpacing: 3) {
-                        InfoRow(label: "Status", value: sig.status.rawValue.capitalized)
-                        InfoRow(label: "Signer", value: sig.signerDescription)
-                        InfoRow(label: "Publisher", value: sig.publisherDescription ?? "")
-                        InfoRow(label: "Team ID", value: sig.teamID ?? "")
-                        if let reason = sig.validationErrorMessage, !reason.isEmpty {
-                            InfoRow(label: "Reason", value: reason)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 8) {
+                if let sig = detail.signature {
+                    Section(title: "Code Signature") {
+                        Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 10, verticalSpacing: 3) {
+                            InfoRow(label: "Status", value: sig.status.rawValue.capitalized)
+                            InfoRow(label: "Signer", value: sig.signerDescription)
+                            InfoRow(label: "Publisher", value: sig.publisherDescription ?? "")
+                            InfoRow(label: "Team ID", value: sig.teamID ?? "")
+                            if let reason = sig.validationErrorMessage, !reason.isEmpty {
+                                InfoRow(label: "Reason", value: reason)
+                            }
+                            InfoRow(label: "Notarized", value: sig.notarizationDescription)
+                            InfoRow(label: "Platform Binary", value: sig.platformBinaryDescription)
+                            InfoRow(label: "SHA-256", value: sig.sha256 ?? "", mono: true)
+                            if let vt = sig.virusTotal {
+                                InfoRow(label: "VirusTotal", value: "\(vt.positives) / \(vt.total) detections")
+                            }
                         }
-                        InfoRow(label: "Notarized", value: sig.isNotarized ? "Yes" : "No")
-                        InfoRow(label: "Platform Binary", value: sig.isPlatformBinary ? "Yes" : "No")
-                        InfoRow(label: "SHA-256", value: sig.sha256 ?? "", mono: true)
-                        if let vt = sig.virusTotal {
-                            InfoRow(label: "VirusTotal", value: "\(vt.positives) / \(vt.total) detections")
+                        authorityChain(sig.authority)
+                        if let note = detail.virusTotalNote {
+                            Text(note).font(.caption).foregroundStyle(.secondary)
                         }
                     }
-                    authorityChain(sig.authority)
-                    if let note = detail.virusTotalNote {
-                        Text(note).font(.caption).foregroundStyle(.secondary)
-                    }
+                } else if detail.isVerifying {
+                    Text("Verifying signature…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text((record.executablePath ?? "").isEmpty ? "No executable path was reported for this process." : "No signature information is available.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
-            } else if detail.isVerifying {
-                Text("Verifying signature…")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } else {
-                Text((record.executablePath ?? "").isEmpty ? "No executable path was reported for this process." : "No signature information is available.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                Spacer(minLength: 0)
             }
-            Spacer(minLength: 0)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 }
@@ -489,10 +499,9 @@ struct SignatureTab: View {
         VStack(alignment: .leading, spacing: 2) {
             Text("Certificate Chain").font(.subheadline).bold()
             ForEach(Array(authority.enumerated()), id: \.offset) { index, name in
-                Text("\(String(repeating: "    ", count: index))- \(name)")
+                Text("\(index + 1). \(name)")
                     .font(.system(.caption, design: .monospaced))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+                    .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
                     .help(name)
             }
@@ -524,8 +533,10 @@ struct PerformanceTab: View {
         Section(title: "CPU") {
             Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 12, verticalSpacing: 5) {
                 InfoRow(label: "CPU Usage", value: String(format: "%.2f %%", record.cpuPercent))
-                InfoRow(label: "Priority", value: String(record.priority))
-                InfoRow(label: "Nice", value: String(record.nice))
+                    .help("100% is one fully busy logical core. A multithreaded process can exceed 100%.")
+                InfoRow(label: "Task Priority", value: String(record.priority))
+                InfoRow(label: "Nice Value", value: String(record.nice))
+                    .help("POSIX nice value. Lower values request more CPU scheduling preference; this is not a QoS class.")
                 InfoRow(label: "CPU Time", value: ByteFormat.duration(nanos: record.cpuTime))
                 InfoRow(label: "Thread User Time", value: record.threadUserTime.map(ByteFormat.duration) ?? "—")
                 InfoRow(label: "Thread Kernel Time", value: record.threadSystemTime.map(ByteFormat.duration) ?? "—")
@@ -539,7 +550,7 @@ struct PerformanceTab: View {
     private var virtualMemorySection: some View {
         Section(title: "Virtual Memory") {
             Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 12, verticalSpacing: 5) {
-                InfoRow(label: "Private Bytes", value: bytes(record.physFootprint ?? record.residentSize))
+                InfoRow(label: "Physical Footprint", value: bytesOrDash(record.physFootprint))
                 InfoRow(label: "Virtual Size", value: bytes(record.virtualSize))
                 InfoRow(label: "Page Faults", value: record.pageFaults.map(String.init) ?? "—")
                 InfoRow(label: "Page Fault Delta", value: String(detail.pageFaultDelta))
@@ -552,7 +563,7 @@ struct PerformanceTab: View {
     private var physicalMemorySection: some View {
         Section(title: "Physical Memory") {
             Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 12, verticalSpacing: 5) {
-                InfoRow(label: "Working Set", value: bytes(record.residentSize))
+                InfoRow(label: "Resident Memory (RSS)", value: bytes(record.residentSize))
             }
         }
     }
@@ -560,8 +571,8 @@ struct PerformanceTab: View {
     private var ioSection: some View {
         Section(title: "I/O") {
             Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 12, verticalSpacing: 5) {
-                InfoRow(label: "Reads", value: bytesOrDash(record.diskBytesRead))
-                InfoRow(label: "Writes", value: bytesOrDash(record.diskBytesWritten))
+                InfoRow(label: "Bytes Read (cumulative)", value: bytesOrDash(record.diskBytesRead))
+                InfoRow(label: "Bytes Written (cumulative)", value: bytesOrDash(record.diskBytesWritten))
                 InfoRow(label: "Mach Msg Sent", value: record.machMessagesSent.map(String.init) ?? "—")
                 InfoRow(label: "Mach Msg Received", value: record.machMessagesReceived.map(String.init) ?? "—")
                 InfoRow(label: "Mach Syscalls", value: record.machSyscalls.map(String.init) ?? "—")
@@ -571,7 +582,7 @@ struct PerformanceTab: View {
     }
 
     private var handlesThreadsSection: some View {
-        Section(title: "Handles / Threads") {
+        Section(title: "File Descriptors / Threads") {
             Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 12, verticalSpacing: 5) {
                 InfoRow(label: "File Descriptors", value: record.fileDescriptorCount.map(String.init) ?? "—")
                 InfoRow(label: "Threads", value: String(record.threadCount))
@@ -590,7 +601,7 @@ struct PerformanceTab: View {
 
 // MARK: - Performance Graph tab
 
-/// Per-process history graphs stacked vertically (CPU %, Private Bytes,
+/// Per-process history graphs stacked vertically (CPU %, physical footprint,
 /// I/O bytes/sec). Fed by the rings in `PropertiesDetail`, which accumulate
 /// one sample per snapshot tick while this window is open. Mirrors Procexp's
 /// per-process graph tab.
@@ -603,22 +614,22 @@ struct PerformanceGraphTab: View {
                 title: "CPU",
                 values: detail.cpuRing.values,
                 color: RGBA(0, 200, 0),
-                maxValue: max(100, (detail.cpuRing.values.max() ?? 0) * 1.1),
-                readout: String(format: "%.2f %%", detail.cpuRing.latest ?? 0)
+                maxValue: max(100, (detail.cpuRing.values.filter(\.isFinite).max() ?? 0) * 1.1),
+                readout: detail.cpuRing.latest.flatMap { $0.isFinite ? String(format: "%.2f %%", $0) : nil } ?? "Unavailable"
             )
             GraphPanel(
-                title: "Private Bytes",
+                title: "Physical Footprint",
                 values: detail.privateRing.values,
                 color: RGBA(210, 90, 210),
-                maxValue: max(1, (detail.privateRing.values.max() ?? 1) * 1.15),
-                readout: ByteFormat.bytes(UInt64(detail.privateRing.latest ?? 0))
+                maxValue: max(1, (detail.privateRing.values.filter(\.isFinite).max() ?? 1) * 1.15),
+                readout: GraphUnit.bytes.format(detail.privateRing.latest ?? .nan)
             )
             GraphPanel(
-                title: "I/O Bytes",
+                title: "Disk I/O Rate",
                 values: detail.ioRing.values,
                 color: RGBA(230, 160, 40),
-                maxValue: max(1, (detail.ioRing.values.max() ?? 1) * 1.15),
-                readout: "\(ByteFormat.bytes(UInt64(detail.ioRing.latest ?? 0)))/s"
+                maxValue: max(1, (detail.ioRing.values.filter(\.isFinite).max() ?? 1) * 1.15),
+                readout: GraphUnit.bytesPerSecond.format(detail.ioRing.latest ?? .nan)
             )
         }
     }
@@ -664,7 +675,7 @@ struct ThreadsTab: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             if detail.threads.isEmpty {
-                Text("No per-thread detail available. The unprivileged sampler reports \(record.threadCount) thread(s); full per-thread CPU and stacks require the privileged helper (task port).")
+                Text(detail.threadNote ?? "Per-thread detail is unavailable. The process sampler reports \(record.threadCount) thread(s); this count does not provide thread identifiers or individual measurements. Access depends on macOS permissions and process protection.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -743,7 +754,7 @@ private struct ThreadRowsTable: NSViewRepresentable {
         }
 
         static let columns = [
-            ColumnDef(id: "tid", title: "TID", width: 120),
+            ColumnDef(id: "tid", title: "Thread Identifier", width: 180),
             ColumnDef(id: "cpu", title: "CPU %", width: 90),
             ColumnDef(id: "state", title: "State", width: 180),
         ]
@@ -863,7 +874,7 @@ private struct ThreadRowsTable: NSViewRepresentable {
 
         private func text(for id: String, thread: ThreadInfo) -> String {
             switch id {
-            case "tid": return String(thread.id)
+            case "tid": return thread.identifierDescription
             case "cpu": return String(format: "%.2f", thread.cpuPercent)
             case "state": return thread.state.isEmpty ? "—" : thread.state
             default: return ""
@@ -1035,6 +1046,8 @@ private struct SocketRowsTable: NSViewRepresentable {
                 let index = (start + offset) % sockets.count
                 let socket = sockets[index]
                 if socket.proto.rawValue.lowercased().hasPrefix(prefix)
+                    || socket.localAddress.lowercased().hasPrefix(prefix)
+                    || socket.remoteAddress.lowercased().hasPrefix(prefix)
                     || endpoint(socket.localAddress, socket.localPort).lowercased().hasPrefix(prefix)
                     || endpoint(socket.remoteAddress, socket.remotePort).lowercased().hasPrefix(prefix)
                     || socket.state.lowercased().hasPrefix(prefix) {
@@ -1094,7 +1107,7 @@ private struct SocketRowsTable: NSViewRepresentable {
 
         private func endpoint(_ address: String, _ port: UInt16) -> String {
             let host = address.isEmpty ? "*" : address
-            return port == 0 ? host : "\(host):\(port)"
+            return SocketInfo.endpoint(address: host, port: port)
         }
 
         private func socketKey(_ socket: SocketInfo) -> String {
@@ -1350,7 +1363,7 @@ struct StringsTab: View {
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                Text("Image strings (memory strings require the privileged helper).")
+                Text("Strings from the executable file. Process-memory string scanning is not implemented.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 StringsRowsTable(strings: filtered, selection: $selectedRows)
@@ -1575,9 +1588,10 @@ struct SecurityTab: View {
                         value: group(identity?.savedGID, identity?.savedGroupName))
                 InfoRow(label: "Account Group",
                         value: group(identity?.accountPrimaryGID, identity?.accountPrimaryGroupName))
-                InfoRow(label: "Session (TTY)", value: record.sessionTTY ?? "—")
-                InfoRow(label: "launchd Managed",
+                InfoRow(label: "Terminal (TTY)", value: record.sessionTTY ?? "—")
+                InfoRow(label: "System Daemon (inferred)",
                         value: record.flags.contains(.service) ? "Yes" : "No")
+                    .help("Heuristic: parent PID is 1 and UID is below 500. This is not verification of a registered launchd job.")
             }
         }
     }
@@ -1625,7 +1639,8 @@ struct SecurityTab: View {
                 InfoRow(label: "Hardened Runtime", value: hardenedRuntimeStatus)
                 InfoRow(label: "Runtime Source", value: detail.securityCode?.hardenedRuntimeNote ?? "Loading…")
                 InfoRow(label: "Platform Binary",
-                        value: record.flags.contains(.platformBinary) ? "Yes" : "No")
+                        value: record.flags.contains(.platformBinary) ? "Yes"
+                            : detail.signature?.platformBinaryDescription ?? "Unknown")
             }
         }
     }

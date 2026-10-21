@@ -107,8 +107,8 @@ struct ProcessPropertiesView: View {
         .confirmationDialog(
             coordinator.pending?.confirmation.title ?? "",
             isPresented: Binding(
-                get: { coordinator.pending != nil },
-                set: { if !$0 { coordinator.cancel() } }
+                get: { coordinator.pending?.presentation == .properties(pid) },
+                set: { if !$0 && coordinator.pending?.presentation == .properties(pid) { coordinator.cancel() } }
             ),
             presenting: coordinator.pending
         ) { pending in
@@ -125,8 +125,8 @@ struct ProcessPropertiesView: View {
         .alert(
             coordinator.errorTitle,
             isPresented: Binding(
-                get: { coordinator.errorMessage != nil },
-                set: { if !$0 { coordinator.errorMessage = nil } }
+                get: { coordinator.errorMessage != nil && coordinator.errorPresentation == .properties(pid) },
+                set: { if !$0 && coordinator.errorPresentation == .properties(pid) { coordinator.errorMessage = nil } }
             )
         ) {
             Button("OK", role: .cancel) { coordinator.errorMessage = nil }
@@ -134,14 +134,14 @@ struct ProcessPropertiesView: View {
             Text(coordinator.errorMessage ?? "")
         }
         .onExitCommand {
-            if coordinator.pending != nil {
+            if coordinator.pending?.presentation == .properties(pid) {
                 coordinator.cancel()
             } else {
                 dismiss()
             }
         }
         .background(EscapeKeyMonitor {
-            if coordinator.pending != nil {
+            if coordinator.pending?.presentation == .properties(pid) {
                 coordinator.cancel()
             } else {
                 dismiss()
@@ -238,7 +238,8 @@ struct EscapeKeyMonitor: NSViewRepresentable {
             guard monitor == nil else { return }
             monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
                 guard let self else { return event }
-                guard event.keyCode == 53, event.window === self.view?.window else { return event }
+                guard event.keyCode == 53, let window = self.view?.window,
+                      event.window === window else { return event }
                 self.action()
                 return nil
             }
