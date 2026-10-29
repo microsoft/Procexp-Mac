@@ -16,15 +16,18 @@ struct AppMenuCommands: Commands {
     private static let f5 = KeyEquivalent(Character(UnicodeScalar(0xF708)!))
 
     var body: some Commands {
-        // FILE — Run / Export.
+        // FILE — Run / Save / Export.
         CommandGroup(replacing: .newItem) {
             Button("Run…") { model.showRunSheet = true }
                 .keyboardShortcut("r", modifiers: .command)
 
             Divider()
 
-            Button("Export Process List…") { model.saveRequestToken += 1 }
+            Button("Save") { model.saveProcessReport() }
                 .keyboardShortcut("s", modifiers: .command)
+            Button("Save As…") { model.saveProcessReport(alwaysPrompt: true) }
+                .keyboardShortcut("s", modifiers: [.command, .shift])
+            Button("Export Process List as CSV…") { model.exportCSVRequestToken += 1 }
         }
 
         // OPTIONS.
@@ -45,6 +48,9 @@ struct AppMenuCommands: Commands {
         // FIND.
         CommandMenu("Find") {
             FindMenu(model: model)
+        }
+        CommandMenu("Lower Pane") {
+            LowerPaneMenu()
         }
     }
 }
@@ -67,10 +73,24 @@ private struct OptionsMenu: View {
     @Bindable var model: AppModel
 
     var body: some View {
+        Toggle("Launch at Login", isOn: Binding(
+            get: { model.loginItemStatus == .enabled || model.loginItemStatus == .requiresApproval },
+            set: { enabled in Task { await model.setLaunchAtLogin(enabled) } }
+        ))
+        .disabled(model.loginItemUpdating)
+        if model.loginItemStatus == .requiresApproval {
+            Button("Approve Launch at Login in System Settings…") { model.dependencies.loginItem.openSettings() }
+        }
+        Divider()
         Toggle("Verify Image Signatures", isOn: $model.verifySignatures)
         Toggle("Confirm Force Quit", isOn: $model.confirmBeforeKill)
         Toggle("Always On Top", isOn: $model.alwaysOnTop)
-        Toggle("Show CPU in Menu Bar", isOn: $model.showMenuBarGraph)
+        Toggle("Show Graph in Menu Bar", isOn: $model.showMenuBarGraph)
+        Picker("Menu Bar Graph", selection: $model.menuBarMetric) {
+            ForEach(MenuBarMetric.allCases) { metric in
+                Text(metric.title).tag(metric)
+            }
+        }
 
         Divider()
 
@@ -92,8 +112,14 @@ private struct ViewMenu: View {
     private let speeds: [TimeInterval] = [0.5, 1, 2, 5, 10]
 
     var body: some View {
-        Button("Show Process Tree") { model.showProcessTreeView() }
+        Toggle("Show Process Tree", isOn: Binding(
+            get: { model.showProcessTree },
+            set: { model.setProcessTreeView($0) }
+        ))
             .keyboardShortcut("t", modifiers: .option)
+        Toggle("Show Column Heatmaps", isOn: $model.showColumnHeatmaps)
+        Toggle("Scroll to New Processes", isOn: $model.scrollToNewProcesses)
+        Toggle("Show Processes From All Users", isOn: $model.showProcessesFromAllUsers)
         Toggle("Show Lower Pane", isOn: $model.showLowerPane)
             .keyboardShortcut("l", modifiers: .command)
 

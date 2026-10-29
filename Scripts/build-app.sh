@@ -8,7 +8,7 @@ CONFIGURATION="${1:-release}"
 SOURCE_APP_NAME="ProcexpMac.app"
 APP_NAME="ProcExp.app"
 APP_BUNDLE_ID="com.sysinternals.procexpmac"
-APP_DISPLAY_NAME="Process Explorer"
+APP_DISPLAY_NAME="Sysinternals Process Explorer"
 SOURCE_APP="$REPO_ROOT/build/DerivedData/Build/Products/Release/$SOURCE_APP_NAME"
 OUTPUT_APP="$REPO_ROOT/.build/$APP_NAME"
 APP_EXECUTABLE="$OUTPUT_APP/Contents/MacOS/ProcexpMac"
@@ -75,6 +75,8 @@ verify_value() {
 APP_INFO_PLIST="$OUTPUT_APP/Contents/Info.plist"
 verify_value "app CFBundleIdentifier" \
     "$(plist_value "$APP_INFO_PLIST" CFBundleIdentifier)" "$APP_BUNDLE_ID"
+verify_value "app CFBundleName" \
+    "$(plist_value "$APP_INFO_PLIST" CFBundleName)" "$APP_DISPLAY_NAME"
 verify_value "app CFBundleDisplayName" \
     "$(plist_value "$APP_INFO_PLIST" CFBundleDisplayName)" "$APP_DISPLAY_NAME"
 verify_value "app CFBundleShortVersionString" \

@@ -20,6 +20,7 @@ DERIVED="$BUILD_DIR/DerivedData"
 STAGE="$BUILD_DIR/dmg-stage"
 PACKAGE_DMG="${PACKAGE_DMG:-1}"
 BUILD_FLAVOR="${PROCEXP_BUILD_FLAVOR:-development}"
+APP_DISPLAY_NAME="Sysinternals Process Explorer"
 VERSION="${PROCEXP_VERSION:-0.1}"
 BUILD_VERSION="${PROCEXP_BUILD_VERSION:-$VERSION}"
 VERSION_PATTERN='^[0-9]+\.[0-9]+(\.[0-9]+)?$'
@@ -29,7 +30,6 @@ fail() { echo "ERROR: $*" >&2; exit 1; }
 case "$BUILD_FLAVOR" in
     official)
         APP_BUNDLE_ID="com.sysinternals.procexpmac"
-        APP_DISPLAY_NAME="Process Explorer"
         APP_WRAPPER_NAME="ProcexpMac.app"
         HELPER_NAME="com.sysinternals.procexpmac.helper"
         HELPER_FLAVOR="official"
@@ -41,7 +41,6 @@ case "$BUILD_FLAVOR" in
     development)
         DERIVED="$BUILD_DIR/DerivedData-Development"
         APP_BUNDLE_ID="com.sysinternals.procexpmac.dev"
-        APP_DISPLAY_NAME="Process Explorer (Dev)"
         APP_WRAPPER_NAME="ProcExp (Dev).app"
         HELPER_NAME="com.sysinternals.procexpmac.dev.helper"
         HELPER_FLAVOR="development"
@@ -96,6 +95,10 @@ ACTUAL_APP_BUNDLE_ID="$(/usr/libexec/PlistBuddy -c \
     'Print :CFBundleIdentifier' "$APP_INFO_PLIST")"
 [[ "$ACTUAL_APP_BUNDLE_ID" == "$APP_BUNDLE_ID" ]] || fail \
     "app bundle id is $ACTUAL_APP_BUNDLE_ID; expected $APP_BUNDLE_ID"
+ACTUAL_APP_NAME="$(/usr/libexec/PlistBuddy -c \
+    'Print :CFBundleName' "$APP_INFO_PLIST")"
+[[ "$ACTUAL_APP_NAME" == "$APP_DISPLAY_NAME" ]] || fail \
+    "app name is $ACTUAL_APP_NAME; expected $APP_DISPLAY_NAME"
 ACTUAL_APP_DISPLAY_NAME="$(/usr/libexec/PlistBuddy -c \
     'Print :CFBundleDisplayName' "$APP_INFO_PLIST")"
 [[ "$ACTUAL_APP_DISPLAY_NAME" == "$APP_DISPLAY_NAME" ]] || fail \

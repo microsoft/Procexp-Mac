@@ -4,6 +4,22 @@ import Foundation
 
 @Suite("ProcexpModel W0 contracts")
 struct ProcexpModelTests {
+    @Test("Provider errors preserve user-facing descriptions through Foundation bridging")
+    func providerErrorDescriptions() {
+        let cases: [(ProviderError, String)] = [
+            (.notPermitted, "Operation not permitted."),
+            (.processGone, "The process has exited."),
+            (.unsupported, "This operation is not supported on this system."),
+            (.helperUnavailable, "The privileged helper is not available."),
+            (.underlying("Helper registration failed: missing embedded helper."),
+             "Helper registration failed: missing embedded helper."),
+        ]
+        for (providerError, expected) in cases {
+            let error: Error = providerError
+            #expect(error.localizedDescription == expected)
+            #expect((error as NSError).localizedDescription == expected)
+        }
+    }
 
     @Test("Tree builder computes roots and children, promoting orphans")
     func treeBuilderRootsAndChildren() {

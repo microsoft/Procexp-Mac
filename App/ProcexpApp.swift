@@ -42,8 +42,9 @@ struct ProcexpApp: App {
                 SystemInfoMenuCommand()
             }
 
-            // Remove the default macOS "Help" menu.
-            CommandGroup(replacing: .help) { }
+            CommandGroup(replacing: .help) {
+                ProcessExplorerHelpCommand()
+            }
         }
 
         // W6 — one Process Properties window per process. Opening the same
@@ -106,6 +107,22 @@ struct ProcexpApp: App {
         }
         .windowResizability(.contentSize)
         .defaultPosition(.center)
+
+        Window("Sysinternals Process Explorer Help", id: ProcessExplorerHelpView.windowID) {
+            ProcessExplorerHelpView()
+        }
+        .defaultSize(width: 720, height: 640)
+    }
+}
+
+private struct ProcessExplorerHelpCommand: View {
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Button("Sysinternals Process Explorer Help") {
+            openWindow(id: ProcessExplorerHelpView.windowID)
+        }
+        .keyboardShortcut("?", modifiers: .command)
     }
 }
 

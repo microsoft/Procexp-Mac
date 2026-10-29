@@ -59,6 +59,7 @@ move_exact() {
 python3 "$REPO_ROOT/Scripts/helper_lifecycle_guard.py" install
 
 IS_OFFICIAL=0
+APP_DISPLAY_NAME="Sysinternals Process Explorer"
 if [[ "${PROCEXP_LOCAL_FLAVOR:-development}" == "official" ]]; then
     IS_OFFICIAL=1
 fi
@@ -66,7 +67,6 @@ fi
 if [[ "$IS_OFFICIAL" -eq 1 ]]; then
     CONFIGURATION="${CONFIGURATION:-Release}"
     APP_BUNDLE_ID="com.sysinternals.procexpmac"
-    APP_DISPLAY_NAME="Process Explorer"
     APP_WRAPPER_NAME="ProcexpMac.app"
     APP_INSTALL_NAME="ProcExp.app"
     HELPER_NAME="com.sysinternals.procexpmac.helper"
@@ -76,7 +76,6 @@ else
     DERIVED="$BUILD_DIR/DerivedData-Development"
     CONFIGURATION="${CONFIGURATION:-Debug}"
     APP_BUNDLE_ID="com.sysinternals.procexpmac.dev"
-    APP_DISPLAY_NAME="Process Explorer (Dev)"
     APP_WRAPPER_NAME="ProcExp (Dev).app"
     APP_INSTALL_NAME="$APP_WRAPPER_NAME"
     HELPER_NAME="com.sysinternals.procexpmac.dev.helper"

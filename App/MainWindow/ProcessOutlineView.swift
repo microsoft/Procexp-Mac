@@ -34,6 +34,7 @@ struct ProcessOutlineView: NSViewRepresentable {
     let treeMode: Bool
     let treeSortResetToken: Int
     let searchText: String
+    let revealRequestToken: Int
     var onCommand: (ProcessCommand, ProcessID) -> Void
 
     func makeNSView(context: Context) -> ProcessListContainerView {
@@ -51,13 +52,13 @@ struct ProcessOutlineView: NSViewRepresentable {
         coordinator.installColumns(columns)
         coordinator.installMenus()
         coordinator.installScrollSync()
-        coordinator.update(snapshot: snapshot, columns: columns, colorRules: colorRules, treeMode: treeMode, treeSortResetToken: treeSortResetToken, searchText: searchText)
+        coordinator.update(snapshot: snapshot, columns: columns, colorRules: colorRules, treeMode: treeMode, treeSortResetToken: treeSortResetToken, searchText: searchText, revealRequestToken: revealRequestToken)
         return container
     }
 
     func updateNSView(_ nsView: ProcessListContainerView, context: Context) {
         context.coordinator.onCommand = onCommand
-        context.coordinator.update(snapshot: snapshot, columns: columns, colorRules: colorRules, treeMode: treeMode, treeSortResetToken: treeSortResetToken, searchText: searchText)
+        context.coordinator.update(snapshot: snapshot, columns: columns, colorRules: colorRules, treeMode: treeMode, treeSortResetToken: treeSortResetToken, searchText: searchText, revealRequestToken: revealRequestToken)
     }
 
     func makeCoordinator() -> Coordinator {
@@ -65,7 +66,7 @@ struct ProcessOutlineView: NSViewRepresentable {
     }
 
     @MainActor
-    final class Coordinator: NSObject, NSMenuDelegate {
+    final class Coordinator: NSObject, NSMenuDelegate, ProcessReportProviding {
         static let rowHeight: CGFloat = 17
         static let headerHeight: CGFloat = 22
         static let defaultProcessPaneWidth: CGFloat = 430
@@ -102,8 +103,10 @@ struct ProcessOutlineView: NSViewRepresentable {
         private var currentTreeSortResetToken = 0
         private var currentSearchText = ""
         private var lastRestoredSelection: ProcessID?
+        private var lastRevealRequestToken: Int = 0
         private var sortColumn: Column?
         private var sortAscending = true
+        private var treeModeBeforeSort = true
         private var didInitialExpand = false
         private var didResetInitialScroll = false
         private var processPaneWidth = defaultProcessPaneWidth
@@ -114,6 +117,8 @@ struct ProcessOutlineView: NSViewRepresentable {
         private var commandLineCache: [ProcessID: String] = [:]
         private var commandLineInFlight: Set<ProcessID> = []
         private var suppressScrollSync = false
+        private var updatingCanvasFrames = false
+        private var pendingScrollID: ProcessID?
         private var scrollObservers: [NSObjectProtocol] = []
         private var activeResize: ColumnResizeState?
         private var activeColumnDrag: ColumnDragState?
@@ -127,6 +132,8 @@ struct ProcessOutlineView: NSViewRepresentable {
             self.onCommand = onCommand
             self.processPaneWidth = CGFloat(model.processColumnWidth)
             self.cachedProcessContentWidth = CGFloat(model.processColumnWidth)
+            super.init()
+            model.processReportSource = self
         }
 
         deinit {
@@ -140,8 +147,12 @@ struct ProcessOutlineView: NSViewRepresentable {
                     colorRules: [ProcessColorRule],
                     treeMode: Bool,
                     treeSortResetToken: Int,
-                    searchText: String) {
+                    searchText: String,
+                    revealRequestToken: Int = 0) {
+            let revealRequested = revealRequestToken != lastRevealRequestToken
+            lastRevealRequestToken = revealRequestToken
             let shouldAutoExpand = !newSnapshot.processes.isEmpty && (!didInitialExpand || snapshot.processes.isEmpty)
+            let newIDs = Set(newSnapshot.processes.keys).subtracting(snapshot.processes.keys)
             if columns != currentColumns {
                 installColumns(columns)
             }
@@ -151,6 +162,7 @@ struct ProcessOutlineView: NSViewRepresentable {
                 currentTreeSortResetToken = treeSortResetToken
                 sortColumn = nil
                 sortAscending = true
+                treeModeBeforeSort = treeMode
             }
             currentSearchText = searchText
             updateProcessHighlights(from: snapshot, to: newSnapshot)
@@ -163,6 +175,10 @@ struct ProcessOutlineView: NSViewRepresentable {
                 expanded = expanded.filter { snapshot.processes[$0] != nil }
                 expanded.formUnion(processHighlights.compactMap { $0.value.kind == .new ? $0.key : nil })
             }
+            if model.scrollToNewProcesses, !shouldAutoExpand {
+                let displayed = Set(displayRoots).union(displayChildren.values.flatMap { $0 })
+                for id in newIDs.intersection(displayed) { expandAncestors(of: id) }
+            }
             rebuildVisibleRows()
             rebuildProcessWidthCache()
             rebuildUsageMaxima()
@@ -171,7 +187,24 @@ struct ProcessOutlineView: NSViewRepresentable {
                 didResetInitialScroll = true
                 scrollToOrigin()
             }
-            restoreSelection()
+            restoreSelection(revealRequested: revealRequested)
+            if model.scrollToNewProcesses, !shouldAutoExpand, !revealRequested,
+               let row = visibleRows.firstIndex(where: { newIDs.contains($0.id) }) {
+                scrollRowToVisible(row)
+            }
+        }
+
+        func reportTable() throws -> ProcessReportTable {
+            let records = displayedProcesses()
+            let columns: [Column] = [.name] + metricColumns
+            return ProcessReportTable(headers: columns.map(\.title), rows: visibleRows.compactMap { row in
+                guard let record = records[row.id] else { return nil }
+                return columns.map { column in
+                    column == .name
+                        ? String(repeating: " ", count: row.depth) + record.name
+                        : column.string(for: record)
+                }
+            })
         }
 
         func installColumns(_ columns: [Column]) {
@@ -294,6 +327,22 @@ struct ProcessOutlineView: NSViewRepresentable {
         }
 
         func updateCanvasFrames() {
+            guard !updatingCanvasFrames else { return }
+            updatingCanvasFrames = true
+            let wasSuppressingSync = suppressScrollSync
+            suppressScrollSync = true
+            defer {
+                suppressScrollSync = wasSuppressingSync
+                updatingCanvasFrames = false
+                if let pendingScrollID,
+                   let scrollView = metricsBodyScrollView, scrollView.contentView.bounds.height > 0,
+                   let row = visibleRows.firstIndex(where: { $0.id == pendingScrollID }) {
+                    self.pendingScrollID = nil
+                    scrollRowToVisible(row)
+                }
+            }
+            let metricsOrigin = metricsBodyScrollView?.contentView.bounds.origin ?? .zero
+            let processX = processBodyScrollView?.contentView.bounds.origin.x ?? 0
             let rowHeight = CGFloat(max(visibleRows.count, 1)) * Self.rowHeight
             let processWidth = cachedProcessContentWidth
             let metricsWidth = max(metricContentWidth(), metricsBodyScrollView?.contentView.bounds.width ?? 0)
@@ -303,6 +352,22 @@ struct ProcessOutlineView: NSViewRepresentable {
             setFrameSize(NSSize(width: metricsWidth, height: Self.headerHeight), for: metricsHeaderView)
             setFrameSize(NSSize(width: metricsWidth, height: rowHeight), for: metricsRowsView)
             updateScrollerVisibility(rowHeight: rowHeight, processWidth: processWidth, metricsWidth: metricsWidth)
+            // AppKit can anchor a growing document to its bottom. Restore the
+            // viewport only after both panes have their new extents.
+            if let metricsBodyScrollView {
+                metricsBodyScrollView.contentView.scroll(to: metricsOrigin)
+                metricsBodyScrollView.reflectScrolledClipView(metricsBodyScrollView.contentView)
+            }
+            let restored = metricsBodyScrollView?.contentView.bounds.origin ?? metricsOrigin
+            if let processBodyScrollView {
+                processBodyScrollView.contentView.scroll(to: NSPoint(x: processX, y: restored.y))
+                processBodyScrollView.reflectScrolledClipView(processBodyScrollView.contentView)
+            }
+            if let metricsHeaderScrollView {
+                metricsHeaderScrollView.contentView.scroll(to: NSPoint(x: restored.x, y: 0))
+                metricsHeaderScrollView.reflectScrolledClipView(metricsHeaderScrollView.contentView)
+            }
+            refreshAccessibility()
         }
 
         private func updateScrollerVisibility(rowHeight: CGFloat, processWidth: CGFloat, metricsWidth: CGFloat) {
@@ -364,6 +429,13 @@ struct ProcessOutlineView: NSViewRepresentable {
             metricsHeaderView?.needsDisplay = true
             processRowsView?.needsDisplay = true
             metricsRowsView?.needsDisplay = true
+            refreshAccessibility()
+        }
+
+        private func refreshAccessibility() {
+            for surface in [processRowsView, metricsRowsView].compactMap({ $0 }) where surface.accessibilityQueried {
+                _ = accessibilityElements(in: surface)
+            }
         }
 
         private var metricColumns: [Column] {
@@ -463,7 +535,10 @@ struct ProcessOutlineView: NSViewRepresentable {
         private func rebuildDisplayTree() {
             let query = currentSearchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             let allProcesses = displayedProcesses()
-            let visible: Set<ProcessID> = query.isEmpty ? Set(allProcesses.keys) : visibleSet(matching: query)
+            var visible: Set<ProcessID> = query.isEmpty ? Set(allProcesses.keys) : visibleSet(matching: query)
+            if !model.showProcessesFromAllUsers {
+                visible = visible.filter { allProcesses[$0]?.uid == model.dependencies.viewerUID }
+            }
             displayChildren.removeAll(keepingCapacity: true)
             guard currentTreeMode, sortColumn == nil else {
                 displayRoots = sorted(Array(visible))
@@ -479,21 +554,12 @@ struct ProcessOutlineView: NSViewRepresentable {
                     displayChildren[parent] = sorted(Array(Set(displayChildren[parent] ?? [])))
                 }
             }
-            let roots = snapshot.roots.filter { visible.contains($0) }
-            if roots.isEmpty, !visible.isEmpty {
-                displayRoots = sorted(visible.filter { pid in
-                    guard let record = allProcesses[pid] else { return false }
-                    guard let parent = record.parent else { return true }
-                    return parent == pid || !visible.contains(parent)
-                })
-            } else {
-                let ghostRoots = removedProcessRecords.keys.filter { id in
-                    guard visible.contains(id), let record = removedProcessRecords[id] else { return false }
-                    guard let parent = record.parent else { return true }
-                    return parent == id || !visible.contains(parent)
-                }
-                displayRoots = sorted(Array(Set(roots + ghostRoots)))
+            let orphanRoots = visible.filter { pid in
+                guard let record = allProcesses[pid] else { return false }
+                guard let parent = record.parent else { return true }
+                return parent == pid || !visible.contains(parent)
             }
+            displayRoots = sorted(Array(Set(snapshot.roots.filter { visible.contains($0) }).union(orphanRoots)))
         }
 
         private func displayedProcesses() -> [ProcessID: ProcessRecord] {
@@ -548,13 +614,17 @@ struct ProcessOutlineView: NSViewRepresentable {
             }
         }
 
-        private func restoreSelection() {
+        private func restoreSelection(revealRequested: Bool) {
             if let selection = model.selection, snapshot.processes[selection] == nil {
+                model.selection = nil
+            }
+            if !model.showProcessesFromAllUsers, let selection = model.selection,
+               snapshot.processes[selection]?.uid != model.dependencies.viewerUID {
                 model.selection = nil
             }
             let selectionChanged = model.selection != lastRestoredSelection
             lastRestoredSelection = model.selection
-            if selectionChanged, let selection = model.selection {
+            if selectionChanged || revealRequested, let selection = model.selection {
                 if visibleRows.firstIndex(where: { $0.id == selection }) == nil {
                     expandAncestors(of: selection)
                     rebuildVisibleRows()
@@ -563,6 +633,11 @@ struct ProcessOutlineView: NSViewRepresentable {
                     updateCanvasFrames()
                 }
                 scrollSelectionToVisible()
+                if revealRequested, let window = containerView?.window {
+                    if window.isMiniaturized { window.deminiaturize(nil) }
+                    window.makeKeyAndOrderFront(nil)
+                    window.makeFirstResponder(processRowsView)
+                }
             }
             invalidateAll()
         }
@@ -673,6 +748,54 @@ struct ProcessOutlineView: NSViewRepresentable {
                                 height: rowRect.height - 2),
                      rightAligned: false,
                      selected: model.selection == row.id)
+        }
+
+        func accessibilityElements(in surface: ProcessListSurfaceView) -> [NSAccessibilityElement] {
+            guard surface.kind == .processRows || surface.kind == .metricsRows else { return [] }
+            surface.accessibilityQueried = true
+            let records = displayedProcesses()
+            let ids = Set(visibleRows.map(\.id))
+            for id in surface.accessibleRows.keys where !ids.contains(id) {
+                surface.accessibleRows.removeValue(forKey: id)?.press = nil
+            }
+            return visibleRows.enumerated().compactMap { index, row -> NSAccessibilityElement? in
+                guard let record = records[row.id], let window = surface.window else { return nil }
+                let element = surface.accessibleRows[row.id] ?? ProcessAccessibleRow()
+                surface.accessibleRows[row.id] = element
+                let frame = NSRect(x: 0, y: CGFloat(index) * Self.rowHeight,
+                                   width: surface.bounds.width, height: Self.rowHeight)
+                element.setAccessibilityRole(.row)
+                element.setAccessibilityParent(surface)
+                element.setAccessibilityFrame(window.convertToScreen(surface.convert(frame, to: nil)))
+                element.setAccessibilityIdentifier(
+                    "\(surface.kind == .processRows ? "process" : "metrics")-row-\(row.id.pid)-\(row.id.startTime)"
+                )
+                element.setAccessibilityLabel(record.name)
+                element.setAccessibilitySelected(model.selection == row.id)
+                element.setAccessibilityDisclosureLevel(row.depth)
+                element.press = { [weak self] in
+                    guard let self else { return false }
+                    self.model.selection = row.id
+                    self.scrollRowToVisible(index)
+                    self.invalidateAll()
+                    return true
+                }
+                let columns: [Column] = surface.kind == .processRows ? [.name] : metricColumns
+                element.cells = element.cells.filter { columns.contains($0.key) }
+                element.setAccessibilityChildren(columns.compactMap { column in
+                    let rect = column == .name ? frame : metricCellRect(for: column, rowIndex: index)
+                    guard let rect else { return nil }
+                    let cell = element.cells[column] ?? NSAccessibilityElement()
+                    element.cells[column] = cell
+                    cell.setAccessibilityRole(.staticText)
+                    cell.setAccessibilityParent(element)
+                    cell.setAccessibilityFrame(window.convertToScreen(surface.convert(rect, to: nil)))
+                    cell.setAccessibilityIdentifier("process-cell-\(row.id.pid)-\(row.id.startTime)-\(column.rawValue)")
+                    cell.setAccessibilityLabel(column == .name ? record.name : column.string(for: record))
+                    return cell
+                })
+                return element
+            }
         }
 
         private func drawMetricCells(for record: ProcessRecord, rowRect: NSRect, dirtyRect: NSRect) {
@@ -1024,17 +1147,18 @@ struct ProcessOutlineView: NSViewRepresentable {
 
         private func sort(by column: Column?) {
             guard let column else { return }
+            if sortColumn == nil { treeModeBeforeSort = currentTreeMode }
             if sortColumn == column {
                 sortAscending.toggle()
             } else {
                 sortColumn = column
                 sortAscending = true
             }
-            rebuildDisplayTree()
             rebuildRowsAfterSort()
         }
 
         private func cycleProcessColumnSort() {
+            if sortColumn == nil { treeModeBeforeSort = currentTreeMode }
             if sortColumn != .name {
                 sortColumn = .name
                 sortAscending = true
@@ -1044,11 +1168,13 @@ struct ProcessOutlineView: NSViewRepresentable {
                 sortColumn = nil
                 sortAscending = true
             }
-            rebuildDisplayTree()
             rebuildRowsAfterSort()
         }
 
         private func rebuildRowsAfterSort() {
+            currentTreeMode = sortColumn == nil && treeModeBeforeSort
+            model.showProcessTree = currentTreeMode
+            rebuildDisplayTree()
             if let selection = model.selection, sortColumn == nil {
                 expandAncestors(of: selection)
             }
@@ -1076,14 +1202,14 @@ struct ProcessOutlineView: NSViewRepresentable {
         }
 
         private func drawUsageHeaderBackground(for column: Column, in rect: NSRect) {
-            guard let base = usageBaseColor(for: column) else { return }
+            guard model.showColumnHeatmaps, let base = usageBaseColor(for: column) else { return }
             let top = base.blended(withFraction: 0.72, of: .white) ?? base
             let bottom = base.blended(withFraction: 0.35, of: .white) ?? base
             NSGradient(starting: top, ending: bottom)?.draw(in: rect, angle: -90)
         }
 
         private func drawUsageCellBackground(for column: Column, record: ProcessRecord, in rect: NSRect) {
-            guard let base = usageBaseColor(for: column), let fraction = usageFraction(for: column, record: record), fraction > 0 else { return }
+            guard model.showColumnHeatmaps, let base = usageBaseColor(for: column), let fraction = usageFraction(for: column, record: record), fraction > 0 else { return }
             let clamped = min(1, max(0, fraction))
             let fillWidth = max(2, floor(rect.width * clamped))
             let usageRect = NSRect(x: rect.maxX - fillWidth, y: rect.minY, width: fillWidth, height: rect.height)
@@ -1230,7 +1356,12 @@ struct ProcessOutlineView: NSViewRepresentable {
         }
 
         private func scrollRowToVisible(_ row: Int) {
-            guard let metricsBodyScrollView else { return }
+            guard visibleRows.indices.contains(row), let metricsBodyScrollView else { return }
+            guard metricsBodyScrollView.contentView.bounds.height > 0 else {
+                pendingScrollID = visibleRows[row].id
+                return
+            }
+            pendingScrollID = nil
             let rowMinY = CGFloat(row) * Self.rowHeight
             let rowMaxY = rowMinY + Self.rowHeight
             var origin = metricsBodyScrollView.contentView.bounds.origin
@@ -1549,10 +1680,17 @@ final class ProcessListSurfaceView: NSView {
     weak var coordinator: ProcessOutlineView.Coordinator?
     private var hoverTrackingArea: NSTrackingArea?
     private let instantTooltip = ProcessInstantTooltip()
+    fileprivate var accessibleRows: [ProcessID: ProcessAccessibleRow] = [:]
+    fileprivate var accessibilityQueried = false
 
     init(kind: ProcessListSurfaceKind) {
         self.kind = kind
         super.init(frame: .zero)
+        if kind == .processRows || kind == .metricsRows {
+            setAccessibilityElement(true)
+            setAccessibilityRole(.table)
+            setAccessibilityIdentifier(kind == .processRows ? "process-table" : "process-metrics")
+        }
     }
 
     required init?(coder: NSCoder) {
@@ -1561,6 +1699,10 @@ final class ProcessListSurfaceView: NSView {
 
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
+
+    override func accessibilityChildren() -> [Any]? {
+        coordinator?.accessibilityElements(in: self)
+    }
 
     // Disable AppKit's asynchronous "responsive scrolling" overlay. The process
     // list is custom-drawn across two vertically-synced panes; the async overlay
@@ -1657,6 +1799,13 @@ final class ProcessListSurfaceView: NSView {
             super.keyDown(with: event)
         }
     }
+}
+
+@MainActor
+fileprivate final class ProcessAccessibleRow: NSAccessibilityElement {
+    var press: (() -> Bool)?
+    var cells: [Column: NSAccessibilityElement] = [:]
+    override func accessibilityPerformPress() -> Bool { press?() ?? false }
 }
 
 @MainActor

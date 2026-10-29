@@ -41,12 +41,27 @@ public protocol ProcessDataProviding: Sendable {
 }
 
 /// Errors providers may throw. Kept minimal and Sendable.
-public enum ProviderError: Error, Sendable {
+public enum ProviderError: LocalizedError, Sendable {
     case notPermitted
     case processGone
     case unsupported
     case helperUnavailable
     case underlying(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .notPermitted:
+            return "Operation not permitted."
+        case .processGone:
+            return "The process has exited."
+        case .unsupported:
+            return "This operation is not supported on this system."
+        case .helperUnavailable:
+            return "The privileged helper is not available."
+        case .underlying(let message):
+            return message
+        }
+    }
 }
 
 /// Root-helper client (W2) — a privileged `ProcessDataProviding` that can also

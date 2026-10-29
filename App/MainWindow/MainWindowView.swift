@@ -11,7 +11,6 @@ import ProcexpGraphs
 struct MainWindowView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.openWindow) private var openWindow
-    @State private var searchText: String = ""
     /// Focus for the search field so ⌘F / the Find button can jump to it.
     @FocusState private var searchFocused: Bool
     /// W8 — routes context-menu / toolbar commands to `ProcessActions` and
@@ -81,7 +80,13 @@ struct MainWindowView: View {
             .onChange(of: model.focusSearchToken) {
                 searchFocused = true
             }
+            .onChange(of: model.processRevealRequestToken) {
+                searchFocused = false
+            }
             .onChange(of: model.saveRequestToken) {
+                model.saveProcessReport()
+            }
+            .onChange(of: model.exportCSVRequestToken) {
                 saveProcessList()
             }
     }
@@ -165,7 +170,8 @@ struct MainWindowView: View {
                            colorRules: model.colorRules,
                            treeMode: model.showProcessTree,
                            treeSortResetToken: model.processTreeSortResetToken,
-                           searchText: searchText) { command, pid in
+                           searchText: model.processFilter,
+                           revealRequestToken: model.processRevealRequestToken) { command, pid in
             handle(command, pid)
         }
     }
@@ -206,9 +212,9 @@ struct MainWindowView: View {
         @Bindable var model = model
         return Group {
             iconButton("save",
-                       tip: "Export Process List… (⌘S)",
+                       tip: "Save Process Explorer Data (⌘S)",
                        shortcut: .init("s", modifiers: .command)) {
-                saveProcessList()
+                model.saveProcessReport()
             }
             iconButton("refresh",
                        tip: "Refresh Now (F5)",
@@ -230,7 +236,7 @@ struct MainWindowView: View {
             iconToggle("tree", isOn: model.showProcessTree,
                        tip: "Show Process Tree (⌥T)",
                        shortcut: .init("t", modifiers: .option)) {
-                model.showProcessTreeView()
+                model.setProcessTreeView(!model.showProcessTree)
             }
             iconButton("props", tip: "Properties… (⌥↩)",
                        shortcut: .init(.return, modifiers: .option),
@@ -295,7 +301,9 @@ struct MainWindowView: View {
     }
 
     private var toolbarFilter: some View {
-        TextField("Filter", text: $searchText)
+        @Bindable var model = model
+        return TextField("Filter", text: $model.processFilter)
+            .accessibilityIdentifier("process-filter")
             .textFieldStyle(.roundedBorder)
             .frame(width: 200)
             .focused($searchFocused)
@@ -341,6 +349,7 @@ struct MainWindowView: View {
                 .interpolation(.high)
                 .frame(width: 18, height: 18)
         }
+        .accessibilityIdentifier("toolbar-\(asset)")
         if let shortcut {
             button
                 .keyboardShortcut(shortcut)
@@ -372,6 +381,7 @@ struct MainWindowView: View {
                     RoundedRectangle(cornerRadius: 5)
                         .fill(isOn ? Color.accentColor.opacity(0.30) : Color.clear)
                 }
+                .accessibilityIdentifier("toolbar-\(asset)")
         }
         if let shortcut {
             button
@@ -395,6 +405,7 @@ struct MainWindowView: View {
                                 systemInfoTab: SystemInfoTab) -> some View {
         @Bindable var model = model
         return ResizableMiniGraph(
+            identifier: "toolbar-graph-\(index)",
             width: $model.graphWidths[index],
             values: values,
             maxValue: maxValue,
@@ -425,10 +436,10 @@ struct MainWindowView: View {
         return "I/O (disk + network): \(GraphUnit.bytesPerSecond.format(rate))"
     }
 
-    /// Export the current process list to a text/CSV file (Procexp "Save").
+    /// CSV is a separate raw-metric export, not the displayed text report.
     func saveProcessList() {
         let panel = NSSavePanel()
-        panel.allowedContentTypes = [.commaSeparatedText, .plainText]
+        panel.allowedContentTypes = [.commaSeparatedText]
         panel.nameFieldStringValue = "processes.csv"
         panel.title = "Export Process List"
         guard panel.runModal() == .OK, let url = panel.url else { return }
@@ -445,8 +456,12 @@ struct MainWindowView: View {
 
     /// Export byte counts without substituting resident memory for an unavailable footprint.
     private func processListCSV() -> String {
+        Self.processListCSV(model.snapshot)
+    }
+
+    static func processListCSV(_ snapshot: ProcessSnapshot) -> String {
         var lines = ["Process,PID,CPU %,Physical Footprint (bytes),Resident Memory (RSS bytes),User"]
-        let records = model.snapshot.processes.values
+        let records = snapshot.processes.values
             .sorted { $0.id.pid < $1.id.pid }
         for r in records {
             func escape(_ s: String) -> String {
@@ -544,6 +559,7 @@ struct MainWindowView: View {
             Text(label + ":")
                 .foregroundStyle(.secondary)
             Text(value)
+                .accessibilityIdentifier("status-value-\(label)")
                 .foregroundStyle(.primary)
         }
         .padding(.horizontal, 8)
@@ -641,6 +657,7 @@ private struct SpacePauseMonitor: NSViewRepresentable {
 /// of the three toolbar graphs can be sized independently, and the value
 /// persists for the lifetime of the session.
 private struct ResizableMiniGraph: View {
+    var identifier: String
     @Binding var width: Double
     var values: [Double]
     var maxValue: Double
@@ -676,8 +693,10 @@ private struct ResizableMiniGraph: View {
             .buttonStyle(.plain)
             .help(tip)
             .accessibilityLabel(tip)
+            .accessibilityIdentifier(identifier)
 
             resizeHandle
+                .accessibilityIdentifier(identifier + "-resize")
         }
     }
 

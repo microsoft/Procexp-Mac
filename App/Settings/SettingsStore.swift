@@ -30,6 +30,11 @@ enum SettingsStore {
         static let verifySignatures   = "settings.verifySignatures"
         static let highlightDuration  = "settings.differenceHighlightDuration"
         static let showLowerPane      = "settings.showLowerPane"
+        static let heatmaps           = "settings.showColumnHeatmaps"
+        static let scrollToNew        = "settings.scrollToNewProcesses"
+        static let allUsers           = "settings.showProcessesFromAllUsers"
+        static let menuBarVisible     = "settings.showMenuBarGraph"
+        static let menuBarMetric      = "settings.menuBarMetric"
     }
 
     private static let schemaVersion = 1
@@ -93,6 +98,21 @@ enum SettingsStore {
         if defaults.object(forKey: Key.showLowerPane) != nil {
             model.showLowerPane = defaults.bool(forKey: Key.showLowerPane)
         }
+        if defaults.object(forKey: Key.heatmaps) != nil {
+            model.showColumnHeatmaps = defaults.bool(forKey: Key.heatmaps)
+        }
+        if defaults.object(forKey: Key.scrollToNew) != nil {
+            model.scrollToNewProcesses = defaults.bool(forKey: Key.scrollToNew)
+        }
+        if defaults.object(forKey: Key.allUsers) != nil {
+            model.showProcessesFromAllUsers = defaults.bool(forKey: Key.allUsers)
+        }
+        if defaults.object(forKey: Key.menuBarVisible) != nil {
+            model.showMenuBarGraph = defaults.bool(forKey: Key.menuBarVisible)
+        }
+        if let raw = defaults.string(forKey: Key.menuBarMetric), let metric = MenuBarMetric(rawValue: raw) {
+            model.menuBarMetric = metric
+        }
     }
 
     // MARK: - Save
@@ -118,5 +138,10 @@ enum SettingsStore {
         defaults.set(model.verifySignatures, forKey: Key.verifySignatures)
         defaults.set(model.differenceHighlightDuration, forKey: Key.highlightDuration)
         defaults.set(model.showLowerPane, forKey: Key.showLowerPane)
+        defaults.set(model.showColumnHeatmaps, forKey: Key.heatmaps)
+        defaults.set(model.scrollToNewProcesses, forKey: Key.scrollToNew)
+        defaults.set(model.showProcessesFromAllUsers, forKey: Key.allUsers)
+        defaults.set(model.showMenuBarGraph, forKey: Key.menuBarVisible)
+        defaults.set(model.menuBarMetric.rawValue, forKey: Key.menuBarMetric)
     }
 }
