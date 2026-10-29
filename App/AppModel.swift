@@ -93,6 +93,11 @@ final class AppModel {
     var confirmBeforeKill: Bool = true { didSet { persistSettings() } }
     var verifySignatures: Bool = true { didSet { persistSettings() } }
     var differenceHighlightDuration: TimeInterval = 1.0 { didSet { persistSettings() } }
+    var showColumnHeatmaps: Bool = true { didSet { persistSettings() } }
+    var scrollToNewProcesses: Bool = false { didSet { persistSettings() } }
+    var showProcessesFromAllUsers: Bool = true { didSet { persistSettings() } }
+    var loginItemStatus: LoginItemStatus = .disabled
+    var loginItemUpdating: Bool = false
 
     /// Gate so restoring persisted settings at launch doesn't immediately
     /// re-save them (and so `init` assignments are never persisted early).
@@ -110,7 +115,11 @@ final class AppModel {
     var processTreeSortResetToken: Int = 0
 
     func showProcessTreeView() {
-        showProcessTree = true
+        setProcessTreeView(true)
+    }
+
+    func setProcessTreeView(_ enabled: Bool) {
+        showProcessTree = enabled
         processTreeSortResetToken += 1
     }
 
@@ -134,12 +143,27 @@ final class AppModel {
     var showOrganizeColumnSetsSheet: Bool = false
     /// Bumped to request focus of the filter field (Find ▸ Filter Processes, ⇧⌘F).
     var focusSearchToken: Int = 0
+    var processFilter: String = ""
+    private(set) var processRevealRequestToken: Int = 0
     /// Bumped to request saving the process list (File ▸ Save, ⌘S).
     var saveRequestToken: Int = 0
+    var exportCSVRequestToken: Int = 0
+    @ObservationIgnored weak var processReportSource: (any ProcessReportProviding)?
+    @ObservationIgnored weak var lowerPaneReportSource: (any LowerPaneReportProviding)?
+    @ObservationIgnored var reportDestination: URL?
+
+    func revealProcess(_ id: ProcessID) {
+        processFilter = ""
+        if let record = snapshot.info(id), record.uid != dependencies.viewerUID {
+            showProcessesFromAllUsers = true
+        }
+        selection = id
+        processRevealRequestToken += 1
+    }
 
     // Target-window picker state. The toolbar starts a one-click global pick;
-    // success writes `selection`, so the existing process-list selection path
-    // remains the only owner of row highlighting and lower-pane follow mode.
+    // success requests a reveal so the process list owns highlighting, scrolling,
+    // and lower-pane follow mode.
     var targetWindowPickerActive: Bool = false
     var targetWindowPickerAlert: TargetWindowPickerAlert?
     var processActionAlert: ProcessActionAlert?
@@ -148,7 +172,8 @@ final class AppModel {
     private var targetWindowCursorPushed = false
 
     // W10 — show the live CPU-history icon in the macOS menu bar.
-    var showMenuBarGraph: Bool = true
+    var showMenuBarGraph: Bool = true { didSet { persistSettings() } }
+    var menuBarMetric: MenuBarMetric = .cpu { didSet { persistSettings() } }
 
     // R1 — sampling can be paused (Procexp "Update Speed ▸ Paused"). While
     // paused the snapshot stream is stopped; toggling off resumes it.
@@ -211,6 +236,7 @@ final class AppModel {
     /// The always-available unprivileged provider, kept for fallback.
     private let libproc: LibprocDataProvider
     private let gpuStats = GPUStatsProvider()
+    let dependencies = AppDependencies()
 
     /// W8 process-control command layer. Carries the privileged helper (when
     /// installed) so actions on other users' processes can escalate.
@@ -268,6 +294,7 @@ final class AppModel {
 
         // W11 — restore persisted preferences, then start tracking changes.
         SettingsStore.load(into: self)
+        refreshLoginItemStatus()
         settingsLoaded = true
     }
 
@@ -813,7 +840,7 @@ final class AppModel {
         guard let record = snapshot.processes.values.first(where: { $0.id.pid == ownerPID }) else {
             return false
         }
-        selection = record.id
+        revealProcess(record.id)
         NSApp.activate(ignoringOtherApps: true)
         return true
     }

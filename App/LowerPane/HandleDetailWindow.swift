@@ -132,7 +132,7 @@ struct HandleDetailView: View {
 
     @ViewBuilder
     private func detail(_ label: String, _ value: String, scroll: Bool = false) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 10) {
+        HStack(alignment: scroll ? .center : .firstTextBaseline, spacing: 10) {
             Text(label)
                 .font(.callout)
                 .foregroundStyle(.secondary)

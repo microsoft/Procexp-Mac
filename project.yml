@@ -49,10 +49,13 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.sysinternals.procexpmac.dev
+        PRODUCT_NAME: "Sysinternals Process Explorer"
+        PRODUCT_MODULE_NAME: ProcexpMac
+        EXECUTABLE_NAME: ProcexpMac
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_LSApplicationCategoryType: "public.app-category.utilities"
         INFOPLIST_KEY_NSHumanReadableCopyright: "Process Explorer for macOS"
-        INFOPLIST_KEY_CFBundleDisplayName: "Process Explorer (Dev)"
+        INFOPLIST_KEY_CFBundleDisplayName: "Sysinternals Process Explorer"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         MACOSX_DEPLOYMENT_TARGET: "14.0"
         COMBINE_HIDPI_IMAGES: YES

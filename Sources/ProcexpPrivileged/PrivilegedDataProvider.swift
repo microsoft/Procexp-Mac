@@ -49,6 +49,18 @@ public final class PrivilegedDataProvider: PrivilegedSampling, @unchecked Sendab
     }
 
     public static func installHelper() async throws {
+        let helperDirectory = Bundle.main.bundleURL
+            .appendingPathComponent("Contents/Library/LaunchDaemons", isDirectory: true)
+        let plistURL = helperDirectory.appendingPathComponent(HelperConstants.daemonPlistName)
+        let executableURL = helperDirectory.appendingPathComponent(HelperConstants.machServiceName)
+        guard FileManager.default.fileExists(atPath: plistURL.path),
+              FileManager.default.isExecutableFile(atPath: executableURL.path) else {
+            throw ProviderError.underlying("""
+            This app build does not contain a complete, executable privileged helper. \
+            Plain Xcode builds omit it. Use a packaged, signed build with the helper \
+            embedded before enabling privileged mode.
+            """)
+        }
         let service = SMAppService.daemon(plistName: HelperConstants.daemonPlistName)
         do {
             try service.register()

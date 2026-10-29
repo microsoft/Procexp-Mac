@@ -2,6 +2,10 @@
 
 The scripts below provide local build and Developer ID validation.
 
+Development and official apps both use **Sysinternals Process Explorer** for
+`CFBundleName` and `CFBundleDisplayName`, matching the main window title and macOS
+application menu. Their bundle identifiers and app filenames remain distinct.
+
 ## Quick start (once you have a Developer ID)
 
 ```bash

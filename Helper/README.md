@@ -10,6 +10,11 @@ builds omit it. `SMAppService` requires a stable signing identity: production
 uses Developer ID, while the local workflow creates a persistent self-signed
 identity and asks for separate user approval.
 
+The app checks for the embedded launchd plist and executable before attempting
+registration. A plain Xcode build reports that the helper is not bundled rather
+than attempting registration; other registration failures retain their underlying
+error message. These diagnostics do not install or sign the helper.
+
 ## Architecture
 
 ```

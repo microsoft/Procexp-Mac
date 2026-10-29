@@ -87,6 +87,8 @@ struct LowerPaneView: View {
     @State private var threads: [ThreadInfo] = []
     @State private var note: String?
     @State private var isRetrieving = false
+    @State private var displayedProcessID: ProcessID?
+    @State private var reportError: String?
 
     @State private var filterText: String = ""
     @State private var selectedModuleID: ModuleRow.ID?
@@ -122,6 +124,7 @@ struct LowerPaneView: View {
             resetForSelectionChange()
             await refreshLoop(for: fetchKey)
         }
+        .focusedSceneValue(\.lowerPaneActions, lowerPaneActions)
     }
 
     // MARK: Header (close · mode toggle · count · filter)
@@ -144,6 +147,7 @@ struct LowerPaneView: View {
                 }
             }
             .pickerStyle(.segmented)
+            .accessibilityIdentifier("lower-pane-mode")
             .labelsHidden()
             .frame(width: 380)
             .help("Show mapped images / files (⌘D), file descriptors (⇧⌘H), or threads (⌘Y)")
@@ -156,6 +160,7 @@ struct LowerPaneView: View {
             Spacer()
 
             TextField("Filter", text: $filterText)
+                .accessibilityIdentifier("lower-pane-filter")
                 .textFieldStyle(.roundedBorder)
                 .frame(width: 180)
         }
@@ -188,28 +193,22 @@ struct LowerPaneView: View {
         } else {
             switch model.lowerPaneMode {
             case .modules:
-                if let note, filteredModules.isEmpty {
-                    message(note)
-                } else {
+                VStack(spacing: 0) {
+                    if let note { noteBanner(note) }
                     modulesTable
                 }
             case .handles:
-                if let note, filteredDescriptors.isEmpty {
-                    message(note)
-                } else {
+                VStack(spacing: 0) {
+                    if let note { noteBanner(note) }
                     handlesTable
                 }
             case .threads:
-                if let note, threads.isEmpty {
-                    message(note)
-                } else {
-                    VStack(spacing: 0) {
-                        if let note {
-                            noteBanner(note)
-                            Divider()
-                        }
-                        threadsTable
+                VStack(spacing: 0) {
+                    if let note {
+                        noteBanner(note)
+                        Divider()
                     }
+                    threadsTable
                 }
             }
         }
@@ -225,6 +224,8 @@ struct LowerPaneView: View {
 
     private var modulesTable: some View {
         ModuleRowsTable(
+            processID: displayedProcessID,
+            reportError: reportError,
             rows: filteredModules,
             columns: AppModel.normalizedModuleColumns(model.moduleColumns),
             highlights: moduleHighlights,
@@ -237,6 +238,8 @@ struct LowerPaneView: View {
 
     private var handlesTable: some View {
         FileDescriptorRowsTable(
+            processID: displayedProcessID,
+            reportError: reportError,
             rows: filteredDescriptors,
             columns: AppModel.normalizedHandleColumns(model.handleColumns),
             highlights: descriptorHighlights,
@@ -247,6 +250,8 @@ struct LowerPaneView: View {
 
     private var threadsTable: some View {
         ThreadRowsTable(
+            processID: displayedProcessID,
+            reportError: reportError,
             rows: filteredThreads,
             columns: AppModel.normalizedThreadColumns(model.threadColumns),
             selection: $selectedThreadID
@@ -255,6 +260,7 @@ struct LowerPaneView: View {
 
     private func noteBanner(_ text: String) -> some View {
         Text(text)
+            .accessibilityIdentifier("lower-pane-message")
             .font(.caption)
             .foregroundStyle(.secondary)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -267,6 +273,7 @@ struct LowerPaneView: View {
         VStack {
             Spacer()
             Text(text)
+                .accessibilityIdentifier("lower-pane-message")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -277,6 +284,32 @@ struct LowerPaneView: View {
     }
 
     // MARK: Detail windows (double-click)
+
+    private var lowerPaneActions: LowerPaneMenuActions {
+        let processID = displayedProcessID
+        let valid = processID != nil && processID == model.selection && !isRetrieving && reportError == nil
+        if valid, model.lowerPaneMode == .modules,
+           let row = filteredModules.first(where: { $0.id == selectedModuleID }) {
+            let reveal: (() -> Void)? = FileManager.default.fileExists(atPath: row.path) ? {
+                if model.selection == processID, model.lowerPaneMode == .modules {
+                    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: row.path)])
+                }
+            } : nil
+            return LowerPaneMenuActions(
+                properties: { if model.selection == processID { openModuleDetail(row) } },
+                searchOnline: { if model.selection == processID { searchOnline(row) } },
+                checkVirusTotal: { if model.selection == processID { checkVirusTotal(row) } },
+                revealInFinder: reveal
+            )
+        }
+        if valid, model.lowerPaneMode == .handles,
+           let row = filteredDescriptors.first(where: { $0.id == selectedFDID }) {
+            return LowerPaneMenuActions(properties: {
+                if model.selection == processID { openHandleDetail(row) }
+            })
+        }
+        return LowerPaneMenuActions()
+    }
 
     private func openModuleDetail(_ row: ModuleRow) {
         guard let pid = model.selection else { return }
@@ -367,6 +400,9 @@ struct LowerPaneView: View {
     /// Fetches immediately then re-fetches every ~2s until the task is
     /// cancelled (selection/mode change or the pane goes off-screen).
     private func resetForSelectionChange() {
+        model.lowerPaneReportSource = nil
+        displayedProcessID = model.selection
+        reportError = nil
         moduleRows = []
         descriptors = []
         threads = []
@@ -387,7 +423,15 @@ struct LowerPaneView: View {
         guard let pid = key.pid else { return }
         while !Task.isCancelled {
             await fetchOnce(pid: pid, mode: key.mode)
-            try? await Task.sleep(for: .seconds(2))
+            do {
+                try await Task.sleep(for: .seconds(2))
+            } catch is CancellationError {
+                return
+            } catch {
+                note = "Refresh unavailable: \(describe(error))"
+                reportError = note
+                return
+            }
         }
     }
 
@@ -409,6 +453,7 @@ struct LowerPaneView: View {
                     moduleSignatureCache[row.path] = row.signature
                 }
                 moduleRows = mergeModuleRows(rows)
+                reportError = nil
                 note = rows.isEmpty
                     ? emptyModulesNote(record: model.snapshot.info(pid))
                     : nil
@@ -416,12 +461,14 @@ struct LowerPaneView: View {
                 guard !Task.isCancelled, model.selection == pid, model.lowerPaneMode == mode else { return }
                 moduleRows = []
                 note = "Mapped images unavailable: \(describe(error))"
+                reportError = note
             }
         case .handles:
             do {
                 let result = try await model.data.fileDescriptors(of: pid)
                 guard !Task.isCancelled, model.selection == pid, model.lowerPaneMode == mode else { return }
                 descriptors = mergeDescriptors(result)
+                reportError = nil
                 note = result.isEmpty
                     ? emptyHandlesNote(record: model.snapshot.info(pid))
                     : nil
@@ -429,17 +476,20 @@ struct LowerPaneView: View {
                 guard !Task.isCancelled, model.selection == pid, model.lowerPaneMode == mode else { return }
                 descriptors = []
                 note = "File descriptors unavailable: \(describe(error))"
+                reportError = note
             }
         case .threads:
             do {
                 let result = try await model.data.threads(of: pid)
                 guard !Task.isCancelled, model.selection == pid, model.lowerPaneMode == mode else { return }
                 threads = result
+                reportError = nil
                 note = threadDetailNote(for: result)
             } catch {
                 guard !Task.isCancelled, model.selection == pid, model.lowerPaneMode == mode else { return }
                 threads = []
                 note = "Threads unavailable: \(describe(error))"
+                reportError = note
             }
         }
     }
@@ -637,6 +687,9 @@ struct LowerPaneView: View {
 }
 
 private struct ModuleRowsTable: NSViewRepresentable {
+    @Environment(AppModel.self) private var model
+    let processID: ProcessID?
+    let reportError: String?
     let rows: [ModuleRow]
     let columns: [ModuleColumn]
     let highlights: [String: TimedListRowHighlight]
@@ -693,6 +746,9 @@ private struct ModuleRowsTable: NSViewRepresentable {
     }
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        context.coordinator.reportProcessID = processID
+        context.coordinator.reportError = reportError
+        model.lowerPaneReportSource = context.coordinator
         context.coordinator.rows = rows
         context.coordinator.columns = columns
         context.coordinator.highlights = highlights
@@ -713,7 +769,12 @@ private struct ModuleRowsTable: NSViewRepresentable {
         coordinator.saveColumnLayout()
     }
 
-    final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
+    final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate, LowerPaneReportProviding {
+        var reportProcessID: ProcessID?
+        var reportError: String?
+        var reportMode: LowerPaneMode { .modules }
+        var reportRowCount: Int { rows.count }
+        func reportCell(column: String, row: Int) -> String { text(for: column, row: rows[row]) }
         struct ColumnDef {
             let id: String
             let title: String
@@ -802,6 +863,7 @@ private struct ModuleRowsTable: NSViewRepresentable {
             let id = tableColumn.identifier.rawValue
             let cell = tableView.makeView(withIdentifier: tableColumn.identifier, owner: self) as? NSTableCellView ?? makeCell(id: tableColumn.identifier)
             configure(cell: cell, text: text(for: id, row: rows[row]), alignment: alignment(for: id))
+            cell.textField?.setAccessibilityIdentifier("module-cell-\(rows[row].path)-\(id)")
             return cell
         }
 
@@ -960,6 +1022,9 @@ private struct ModuleRowsTable: NSViewRepresentable {
 }
 
 private struct FileDescriptorRowsTable: NSViewRepresentable {
+    @Environment(AppModel.self) private var model
+    let processID: ProcessID?
+    let reportError: String?
     let rows: [FileDescriptorInfo]
     let columns: [HandleColumn]
     let highlights: [String: TimedListRowHighlight]
@@ -1008,6 +1073,9 @@ private struct FileDescriptorRowsTable: NSViewRepresentable {
     }
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        context.coordinator.reportProcessID = processID
+        context.coordinator.reportError = reportError
+        model.lowerPaneReportSource = context.coordinator
         context.coordinator.rows = rows
         context.coordinator.columns = columns
         context.coordinator.highlights = highlights
@@ -1026,7 +1094,12 @@ private struct FileDescriptorRowsTable: NSViewRepresentable {
         coordinator.saveColumnLayout()
     }
 
-    final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate {
+    final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate, LowerPaneReportProviding {
+        var reportProcessID: ProcessID?
+        var reportError: String?
+        var reportMode: LowerPaneMode { .handles }
+        var reportRowCount: Int { rows.count }
+        func reportCell(column: String, row: Int) -> String { text(for: column, row: rows[row]) }
         struct ColumnDef {
             let id: String
             let title: String
@@ -1091,6 +1164,7 @@ private struct FileDescriptorRowsTable: NSViewRepresentable {
             let id = tableColumn.identifier.rawValue
             let cell = tableView.makeView(withIdentifier: tableColumn.identifier, owner: self) as? NSTableCellView ?? makeCell(id: tableColumn.identifier)
             configure(cell: cell, text: text(for: id, row: rows[row]), alignment: alignment(for: id))
+            cell.textField?.setAccessibilityIdentifier("handle-cell-\(rows[row].id)-\(id)")
             return cell
         }
 
@@ -1226,6 +1300,9 @@ private struct FileDescriptorRowsTable: NSViewRepresentable {
 }
 
 private struct ThreadRowsTable: NSViewRepresentable {
+    @Environment(AppModel.self) private var model
+    let processID: ProcessID?
+    let reportError: String?
     let rows: [ThreadInfo]
     let columns: [ThreadColumn]
     @Binding var selection: ThreadInfo.ID?
@@ -1270,6 +1347,9 @@ private struct ThreadRowsTable: NSViewRepresentable {
     }
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        context.coordinator.reportProcessID = processID
+        context.coordinator.reportError = reportError
+        model.lowerPaneReportSource = context.coordinator
         context.coordinator.rows = rows
         context.coordinator.columns = columns
         guard let tableView = context.coordinator.tableView else { return }
@@ -1286,7 +1366,12 @@ private struct ThreadRowsTable: NSViewRepresentable {
         coordinator.saveColumnLayout()
     }
 
-    final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate {
+    final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate, LowerPaneReportProviding {
+        var reportProcessID: ProcessID?
+        var reportError: String?
+        var reportMode: LowerPaneMode { .threads }
+        var reportRowCount: Int { rows.count }
+        func reportCell(column: String, row: Int) -> String { text(for: column, row: rows[row]) }
         struct ColumnDef {
             let id: String
             let title: String
@@ -1348,6 +1433,7 @@ private struct ThreadRowsTable: NSViewRepresentable {
             let id = tableColumn.identifier.rawValue
             let cell = tableView.makeView(withIdentifier: tableColumn.identifier, owner: self) as? NSTableCellView ?? makeCell(id: tableColumn.identifier)
             configure(cell: cell, text: text(for: id, row: rows[row]), alignment: alignment(for: id))
+            cell.textField?.setAccessibilityIdentifier("thread-cell-\(rows[row].id)-\(id)")
             return cell
         }
 

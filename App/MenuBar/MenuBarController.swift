@@ -1,10 +1,8 @@
 //
 //  MenuBarController.swift
-//  W10 — live CPU-history icon in the macOS menu bar.
+//  Live resource-history icon in the macOS menu bar.
 //
-//  Owns an `NSStatusItem` whose image is a small strip-chart of
-//  `AppModel.cpuHistory`, redrawn whenever the model updates. Mirrors the
-//  Process Explorer tray CPU-history icon (green bars on a dark background).
+//  Owns an `NSStatusItem` showing the selected native resource history.
 //
 
 import AppKit
@@ -17,12 +15,12 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let iconSize = NSSize(width: 22, height: 18)
 
     private weak var model: AppModel?
-    private var statusItem: NSStatusItem?
+    private(set) var statusItem: NSStatusItem?
     private let menu = NSMenu()
     var onShowMainWindow: (() -> Void)?
 
     // Dynamic menu header items, rebuilt each time the menu opens.
-    private let cpuHeaderItem = NSMenuItem(title: "CPU: —", action: nil, keyEquivalent: "")
+    private let metricHeaderItem = NSMenuItem(title: "CPU: —", action: nil, keyEquivalent: "")
     private let topProcessItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
 
     override init() {
@@ -63,19 +61,23 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         }
 
         let item = ensureStatusItem()
-        let cpu = model.cpuHistory.values
+        let values = model.menuBarMetric.values(in: model)
         let currentCPU = model.cpuHistory.latest ?? model.snapshot.system.cpuTotalPercent
         let busiest = busiestProcess(in: model)
 
         if let button = item.button {
-            button.image = makeGraphImage(from: cpu)
-            button.toolTip = tooltip(cpu: currentCPU, busiest: busiest)
+            button.image = makeGraphImage(from: values, maximum: model.menuBarMetric.maximum(for: values))
+            button.toolTip = model.menuBarMetric == .cpu
+                ? tooltip(cpu: currentCPU, busiest: busiest)
+                : model.menuBarMetric.readout(values.last)
+            button.setAccessibilityLabel("\(model.menuBarMetric.title) history")
         }
     }
 
     private func ensureStatusItem() -> NSStatusItem {
         if let statusItem { return statusItem }
         let item = NSStatusBar.system.statusItem(withLength: iconSize.width + 6)
+        item.button?.setAccessibilityIdentifier("menu-bar-cpu-graph")
         item.button?.imageScaling = .scaleNone
         item.menu = menu
         statusItem = item
@@ -85,7 +87,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     // MARK: - Icon drawing
 
     /// Draw a small green strip-chart of CPU history onto an `NSImage`.
-    private func makeGraphImage(from history: [Double]) -> NSImage {
+    private func makeGraphImage(from history: [Double], maximum: Double) -> NSImage {
         let size = iconSize
         let image = NSImage(size: size)
         image.lockFocus()
@@ -116,7 +118,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         NSColor.systemGreen.setFill()
         for (i, value) in samples.enumerated() {
             guard value.isFinite else { continue }
-            let clamped = min(max(value, 0), 100) / 100
+            let clamped = min(max(value, 0), maximum) / maximum
             let barHeight = CGFloat(clamped) * plot.height
             let rect = NSRect(
                 x: plot.minX + CGFloat(i) * barWidth,
@@ -135,10 +137,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     private func buildMenu() {
         menu.delegate = self
-        cpuHeaderItem.isEnabled = false
+        metricHeaderItem.isEnabled = false
         topProcessItem.isEnabled = false
 
-        menu.addItem(cpuHeaderItem)
+        menu.addItem(metricHeaderItem)
         menu.addItem(topProcessItem)
         menu.addItem(.separator())
 
@@ -151,7 +153,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         menu.addItem(show)
 
         let toggle = NSMenuItem(
-            title: "Show CPU in Menu Bar",
+            title: "Show Graph in Menu Bar",
             action: #selector(toggleMenuBarGraph),
             keyEquivalent: ""
         )
@@ -159,6 +161,16 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         toggle.state = .on
         menu.addItem(toggle)
 
+        let graphItem = NSMenuItem(title: "Graph", action: nil, keyEquivalent: "")
+        let graphMenu = NSMenu(title: "Graph")
+        for metric in MenuBarMetric.allCases {
+            let item = NSMenuItem(title: metric.title, action: #selector(selectMetric(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = metric.rawValue
+            graphMenu.addItem(item)
+        }
+        graphItem.submenu = graphMenu
+        menu.addItem(graphItem)
         menu.addItem(.separator())
 
         let quit = NSMenuItem(
@@ -174,17 +186,22 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) {
         guard let model else { return }
         let currentCPU = model.cpuHistory.latest ?? model.snapshot.system.cpuTotalPercent
-        cpuHeaderItem.title = currentCPU.isFinite ? String(format: "CPU: %.1f%%", currentCPU) : "CPU: Unavailable"
+        metricHeaderItem.title = model.menuBarMetric.readout(
+            model.menuBarMetric == .cpu ? currentCPU : model.menuBarMetric.values(in: model).last
+        )
 
-        if let busiest = busiestProcess(in: model) {
+        if model.menuBarMetric == .cpu, let busiest = busiestProcess(in: model) {
             topProcessItem.title = String(format: "Busiest: %@ (%.1f%%)", busiest.name, busiest.cpuPercent)
             topProcessItem.isHidden = false
         } else {
             topProcessItem.isHidden = true
         }
 
-        if let toggle = menu.item(withTitle: "Show CPU in Menu Bar") {
+        if let toggle = menu.item(withTitle: "Show Graph in Menu Bar") {
             toggle.state = model.showMenuBarGraph ? .on : .off
+        }
+        for item in menu.item(withTitle: "Graph")?.submenu?.items ?? [] {
+            item.state = (item.representedObject as? String) == model.menuBarMetric.rawValue ? .on : .off
         }
     }
 
@@ -198,6 +215,11 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     @objc private func toggleMenuBarGraph() {
         guard let model else { return }
         model.showMenuBarGraph.toggle()
+    }
+
+    @objc private func selectMetric(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let metric = MenuBarMetric(rawValue: raw) else { return }
+        model?.menuBarMetric = metric
     }
 
     @objc private func quit() {
