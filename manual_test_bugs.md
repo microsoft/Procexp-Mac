@@ -16,10 +16,11 @@ platform difference as a bug or silently expand the implementation scope.
 - **Merged:** [#15](https://github.com/microsoft/Procexp-Mac/pull/15), "Fix process
   metrics, native UI behavior, and helper lifecycle bugs," merged into `main`
   on 2026-10-21 as `6845dcc`. That PR delivered the earlier bug-fix batch.
-- **Not yet merged:** The manual fixes MT-001 through MT-005 and the native
-  parity implementation below were made after #15. They are being submitted in
-  a new PR; #15's merged state does not apply to them. Manual retest and signing/
-  permission limitations remain separate from whether a PR is merged.
+- **Open for review, not merged:** [#17](https://github.com/microsoft/Procexp-Mac/pull/17)
+  contains the manual fixes MT-001 through MT-005 and the native parity
+  implementation below, all made after #15. #15's merged state does not apply to
+  these changes. Manual retest and signing/permission limitations remain separate
+  from whether a PR is merged.
 - **PR scope:** App fixes, selected native parity features, necessary packaging
   settings, this record, and the focused provider-error regression. The older
   coverage campaign, fixture/workload applications and broad test infrastructure
