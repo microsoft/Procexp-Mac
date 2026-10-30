@@ -54,8 +54,20 @@ final class AppModel {
     static let defaultProcessColumnWidth: Double = 430
 
     // Latest sampled state.
-    var snapshot: ProcessSnapshot = .empty
-    var selection: ProcessID?
+    var snapshot: ProcessSnapshot = .empty {
+        didSet { updateSelectedProcessSuspension() }
+    }
+    var selection: ProcessID? {
+        didSet { updateSelectedProcessSuspension() }
+    }
+    private(set) var selectedProcessIsSuspended = false
+
+    private func updateSelectedProcessSuspension() {
+        let suspended = selection.flatMap { snapshot.info($0)?.flags.contains(.suspended) } ?? false
+        if selectedProcessIsSuspended != suspended {
+            selectedProcessIsSuspended = suspended
+        }
+    }
 
     // View configuration. `didSet` observers persist changes (W11) once the
     // stored settings have finished loading at launch.

@@ -249,9 +249,7 @@ private struct ProcessMenu: View {
     }
 
     private var suspendTitle: String {
-        let suspended = model.selection
-            .flatMap { model.snapshot.info($0)?.flags.contains(.suspended) } ?? false
-        return suspended ? "Resume" : "Suspend"
+        model.selectedProcessIsSuspended ? "Resume" : "Suspend"
     }
 
     private func request(_ kind: ProcessActionKind) {

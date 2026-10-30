@@ -33,6 +33,67 @@ platform difference as a bug or silently expand the implementation scope.
   the existing production providers rather than importing the older test-only
   provider/clock infrastructure. No helper or login item was installed.
 
+## MT-007: View menu's final command section is indented
+
+**Reported:** 2026-10-29
+
+**Status:** Fixed in source; Debug build and local visual retest passed.
+
+**Reproduction:** Open View and compare Select Columns, the column-set commands,
+and System Information with the preceding commands.
+
+**Cause:** These commands shared a section with macOS's icon-bearing Enter Full
+Screen command, which reserves an extra image gutter on the tested macOS version.
+
+**Fix:** Separate the application's final View commands from the system command
+with a divider after System Information in `App/ProcexpApp.swift`.
+
+**Verification:** Captured the native View menu before and after the change.
+Application command labels align after the change; the system command retains its
+own icon gutter.
+
+## MT-008: Set Nice Value submenu disappears during process refresh
+
+**Reported:** 2026-10-29
+
+**Status:** Fixed in source; Debug build and live-menu retest passed.
+
+**Reproduction:** Select a process, open Process > Set Nice Value, and leave the
+submenu open while the process list refreshes.
+
+**Cause:** The Process menu read the entire observable snapshot to compute the
+Suspend/Resume title, invalidating the menu for every sampling update.
+
+**Fix:** Maintain selected-process suspension as a narrowly observed stored value
+in `App/AppModel.swift`, updated when the snapshot or selection changes, but
+assigned only when the suspension state differs. The menu in
+`App/Menus/AppMenus.swift` reads that value rather than the high-frequency snapshot.
+Action handlers still consult current process state when invoked.
+
+**Verification:** With a harmless owned `sleep` process selected, all five enabled
+Nice values remained visible through five one-second refresh intervals. No
+priority change was applied during this check.
+
+## MT-009: Process tooltips are unreadable in dark appearance
+
+**Reported:** 2026-10-29
+
+**Status:** Fixed in source; Debug build and light/dark visual retests passed.
+
+**Cause:** The tooltip's layer cached background and border CGColors at
+initialization, while its text used an appearance-dependent color. The separate
+tooltip window also did not explicitly follow the source view's appearance.
+
+**Fix:** In `App/MainWindow/ProcessOutlineView.swift`, apply the source view's
+effective appearance to the tooltip window and resolve layer colors in that
+appearance each time the tooltip is shown.
+
+**Verification:** The same tooltip displayed readable light text on a dark
+background in Dark mode and dark text on a light background after switching back
+to Light mode. Captured both states. The development app built successfully, and
+all 42 Swift package tests passed in the full local workspace, including the
+earlier uncommitted fixture tests that remain outside this UI-fix commit.
+
 ## MT-001: Path value is vertically misaligned in file descriptor details
 
 **Reported:** 2026-10-27
