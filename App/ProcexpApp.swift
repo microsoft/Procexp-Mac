@@ -40,6 +40,7 @@ struct ProcexpApp: App {
             // W4 — open the System Information window (⌘I).
             CommandGroup(after: .toolbar) {
                 SystemInfoMenuCommand()
+                Divider()
             }
 
             CommandGroup(replacing: .help) {

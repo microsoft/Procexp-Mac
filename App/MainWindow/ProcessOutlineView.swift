@@ -1824,8 +1824,6 @@ private final class ProcessInstantTooltip {
         container.wantsLayer = true
         container.layer?.cornerRadius = 4
         container.layer?.borderWidth = 1
-        container.layer?.borderColor = NSColor.separatorColor.cgColor
-        container.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
 
         label.font = .systemFont(ofSize: NSFont.systemFontSize)
         label.textColor = .labelColor
@@ -1856,6 +1854,12 @@ private final class ProcessInstantTooltip {
 
         let tooltipWindow = window ?? makeWindow(size: size)
         window = tooltipWindow
+        let appearance = view.effectiveAppearance
+        tooltipWindow.appearance = appearance
+        appearance.performAsCurrentDrawingAppearance {
+            container.layer?.borderColor = NSColor.separatorColor.cgColor
+            container.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+        }
         tooltipWindow.setContentSize(size)
         let screenPoint = sourceWindow.convertPoint(toScreen: event.locationInWindow)
         tooltipWindow.setFrameOrigin(clampedOrigin(near: screenPoint, size: size, screen: sourceWindow.screen ?? NSScreen.main))
