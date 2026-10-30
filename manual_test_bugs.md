@@ -33,6 +33,41 @@ platform difference as a bug or silently expand the implementation scope.
   the existing production providers rather than importing the older test-only
   provider/clock infrastructure. No helper or login item was installed.
 
+## Filter viewport regression (2026-10-29)
+
+**Reported:** Filtering for `Finder` or `Proc` can leave the process pane blank,
+including with Show Process Tree disabled.
+
+**Cause:** The matching records exist, but `updateCanvasFrames()` restores the
+old scroll offset after shortening the document. The filtered rows are above the
+viewport. Horizontal offsets can similarly outlive a narrower document.
+
+**Fix:** Clamp the restored metrics viewport to the new document extents, clamp
+the process pane's independent horizontal offset, and keep the two panes'
+vertical positions and the metrics header synchronized. Valid offsets are
+preserved during ordinary refreshes, document growth, and resizing. Filtering
+does not automatically select a process or change process-control behavior.
+
+**Automated regression:** Run `bash Scripts/test_process_outline.sh` with full
+Xcode selected. This builds the Debug app and links a native AppKit harness
+against its actual testable module/debug library; no Accessibility permission
+or interaction with the running GUI is needed. It verifies Finder and Proc,
+case-insensitive matching, PID matching, no matches, and clearing the filter
+after a deep scroll in both tree and flat modes. It also checks horizontal
+clamping, synchronized panes/header, unchanged refreshes, document growth,
+resizing, and metric-column removal. The Finder/flat-mode case failed on the
+unfixed code because the viewport was outside the document, then passed with
+the fix.
+
+**Verification:** Debug build and strict code-signature verification passed.
+All 12 query/tree-mode combinations and the additional native geometry checks
+passed. The full local Swift package suite passed all 42 tests (including the
+earlier local fixture tests, which remain outside this fix), and
+`swift run ProcexpSmoke` passed. In the restarted development GUI, scrolled far
+down with tree mode off, then typed `Finder` and repeated with `Proc`: Finder and
+ProcexpMac were visibly rendered at the top of the filtered pane. Captured both
+states as screenshot evidence.
+
 ## MT-007: View menu's final command section is indented
 
 **Reported:** 2026-10-29

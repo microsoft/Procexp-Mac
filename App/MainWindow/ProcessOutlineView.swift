@@ -352,16 +352,23 @@ struct ProcessOutlineView: NSViewRepresentable {
             setFrameSize(NSSize(width: metricsWidth, height: Self.headerHeight), for: metricsHeaderView)
             setFrameSize(NSSize(width: metricsWidth, height: rowHeight), for: metricsRowsView)
             updateScrollerVisibility(rowHeight: rowHeight, processWidth: processWidth, metricsWidth: metricsWidth)
-            // AppKit can anchor a growing document to its bottom. Restore the
-            // viewport only after both panes have their new extents.
+            // Preserve valid offsets on growth, but constrain them when filtering
+            // or column changes shrink the documents.
             if let metricsBodyScrollView {
-                metricsBodyScrollView.contentView.scroll(to: metricsOrigin)
-                metricsBodyScrollView.reflectScrolledClipView(metricsBodyScrollView.contentView)
+                let clip = metricsBodyScrollView.contentView
+                let origin = NSPoint(
+                    x: min(max(0, metricsOrigin.x), max(0, metricsWidth - clip.bounds.width)),
+                    y: min(max(0, metricsOrigin.y), max(0, rowHeight - clip.bounds.height))
+                )
+                clip.scroll(to: origin)
+                metricsBodyScrollView.reflectScrolledClipView(clip)
             }
             let restored = metricsBodyScrollView?.contentView.bounds.origin ?? metricsOrigin
             if let processBodyScrollView {
-                processBodyScrollView.contentView.scroll(to: NSPoint(x: processX, y: restored.y))
-                processBodyScrollView.reflectScrolledClipView(processBodyScrollView.contentView)
+                let clip = processBodyScrollView.contentView
+                let x = min(max(0, processX), max(0, processWidth - clip.bounds.width))
+                clip.scroll(to: NSPoint(x: x, y: restored.y))
+                processBodyScrollView.reflectScrolledClipView(clip)
             }
             if let metricsHeaderScrollView {
                 metricsHeaderScrollView.contentView.scroll(to: NSPoint(x: restored.x, y: 0))
