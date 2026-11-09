@@ -4,6 +4,8 @@ Sysinternals Process Explorer for Mac is a native macOS implementation of the co
 
 The app is built with Swift, SwiftUI, and AppKit, with sampling backed by public macOS APIs such as `libproc`, `sysctl`, Mach host statistics, Security.framework, IOKit, Metal, and optional privileged helper support.
 
+![Sysinternals Process Explorer for Mac showing process details and system information](docs/images/process-explorer.png)
+
 ## Features
 
 - Live process tree with Process Explorer-style colors for services, own processes, new/deleted processes, suspended processes, sandboxed processes, and packed images.
