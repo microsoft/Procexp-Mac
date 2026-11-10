@@ -405,44 +405,44 @@ final class AppModel {
     }
 
     private func sampleSnapshot() async -> ProcessSnapshot {
-        guard let helper = helperCandidate ?? privileged else { return await libproc.snapshot() }
-        let generation = providerGeneration
-        do {
-            let snapshot = try await helper.checkedSnapshot()
-            guard !Task.isCancelled, providerGeneration == generation else {
-                return await libproc.snapshot()
-            }
-            if privileged !== helper {
-                providerDidChange()
-                privileged = helper
-                helperCandidate = nil
-                data = helper
-                actions = ProcessActions(privileged: helper)
-                helperFailure = nil
-                if processActionAlert?.title == "Privileged Helper Unavailable" {
-                    processActionAlert = nil
+        while true {
+            guard let helper = helperCandidate ?? privileged else { return await libproc.snapshot() }
+            let generation = providerGeneration
+            do {
+                let snapshot = try await helper.checkedSnapshot()
+                guard !Task.isCancelled else { return await libproc.snapshot() }
+                guard providerGeneration == generation else { continue }
+                if privileged !== helper {
+                    providerDidChange()
+                    privileged = helper
+                    helperCandidate = nil
+                    data = helper
+                    actions = ProcessActions(privileged: helper)
+                    helperFailure = nil
+                    if processActionAlert?.title == "Privileged Helper Unavailable" {
+                        processActionAlert = nil
+                    }
                 }
-            }
-            return snapshot
-        } catch {
-            guard !Task.isCancelled, providerGeneration == generation else {
+                return snapshot
+            } catch {
+                guard !Task.isCancelled else { return await libproc.snapshot() }
+                guard providerGeneration == generation else { continue }
+                useLocalProvider()
+                refreshHelperStatus()
+                let message = """
+                \(error.localizedDescription)
+
+                The app has switched to unprivileged access for process sampling, details, \
+                and actions. You can retry the helper or uninstall it from the app menu. \
+                If approval is pending, approve it in System Settings > General > Login Items & Extensions.
+                """
+                helperFailure = message
+                // Explicit installs already present their result in a modal alert.
+                if !helperChanging {
+                    processActionAlert = ProcessActionAlert(title: "Privileged Helper Unavailable", message: message)
+                }
                 return await libproc.snapshot()
             }
-            useLocalProvider()
-            refreshHelperStatus()
-            let message = """
-            \(error.localizedDescription)
-
-            The app has switched to unprivileged access for process sampling, details, \
-            and actions. You can retry the helper or uninstall it from the app menu. \
-            If approval is pending, approve it in System Settings > General > Login Items & Extensions.
-            """
-            helperFailure = message
-            // Explicit installs already present their result in a modal alert.
-            if !helperChanging {
-                processActionAlert = ProcessActionAlert(title: "Privileged Helper Unavailable", message: message)
-            }
-            return await libproc.snapshot()
         }
     }
 

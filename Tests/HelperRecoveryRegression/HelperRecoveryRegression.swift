@@ -252,6 +252,45 @@ struct HelperRecoveryRegression {
         streamModel.stop()
         print("PASS: ongoing stream failure recovers and local sampling continues")
 
+        let concurrent = Fixture()
+        let concurrentStarted = [DispatchSemaphore(value: 0), DispatchSemaphore(value: 0)]
+        let concurrentLock = NSLock()
+        var concurrentRequests = 0
+        let helperData = try JSONEncoder().encode(ProcessSnapshotDTO(HelperStub.snapshot(pid: 202)))
+        concurrent.helper.onSnapshot = { reply in
+            concurrentLock.lock()
+            concurrentRequests += 1
+            let request = concurrentRequests
+            concurrentLock.unlock()
+            if request <= 2 {
+                concurrentStarted[request - 1].signal()
+                let delay: TimeInterval = request == 1 ? 0.05 : 0.2
+                DispatchQueue.global().asyncAfter(deadline: .now() + delay) {
+                    if request == 1 {
+                        reply(helperData, nil)
+                    } else {
+                        reply(nil, HelperError.make(.underlying, "Superseded helper sample failed"))
+                    }
+                }
+            } else {
+                reply(helperData, nil)
+            }
+        }
+        let concurrentModel = concurrent.model()
+        concurrentModel.paused = true
+        let firstRefresh = Task { await concurrentModel.forceRefresh() }
+        try await waitUntil { concurrentStarted[0].wait(timeout: .now()) == .success }
+        let secondRefresh = Task { await concurrentModel.forceRefresh() }
+        try await waitUntil { concurrentStarted[1].wait(timeout: .now()) == .success }
+        try await waitUntil { concurrentModel.privileged != nil }
+        await firstRefresh.value
+        await secondRefresh.value
+        try check(concurrentModel.snapshot.processes.keys.contains { $0.pid == 202 },
+                  "A superseded helper failure published a local-only snapshot")
+        try check(concurrentModel.privileged != nil && concurrentModel.actions.privileged != nil,
+                  "A superseded helper failure changed the active provider")
+        print("PASS: overlapping refreshes retry a superseded helper failure against the active provider")
+
         let install = Fixture()
         install.status = .notRegistered
         install.reject()
