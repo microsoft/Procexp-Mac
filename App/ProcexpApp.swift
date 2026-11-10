@@ -179,27 +179,26 @@ private struct SystemInfoMenuCommand: View {    @Environment(\.openWindow) priva
     }
 }
 
-/// Menu command to install the privileged root helper. Disabled (greyed out)
-/// once the helper is installed, since there is nothing more to do. A companion
-/// "Uninstall…" item (enabled only when installed) unregisters it — no sudo, so
-/// it is handy for re-testing the first-install flow.
+/// Registration, reachability retry, and removal stay distinct so an installed
+/// but unreachable helper can still be retried or removed.
 private struct InstallHelperMenuCommand: View {
     @Bindable var model: AppModel
 
     var body: some View {
-        Button(model.helperInstalled ? "Privileged Helper Enabled"
+        Button(model.privileged != nil ? "Privileged Helper Enabled"
+               : model.helperInstalled ? "Retry Privileged Helper…"
                : model.helperApprovalPending ? "Privileged Helper Awaiting Approval"
                : "Install Privileged Helper…") {
             let model = model
             Task { await runHelperInstall(model) }
         }
-        .disabled(model.helperInstalled || model.helperApprovalPending)
+        .disabled(model.privileged != nil || model.helperApprovalPending || model.helperChanging)
 
         Button("Uninstall Privileged Helper…") {
             let model = model
             Task { await runHelperUninstall(model) }
         }
-        .disabled(!model.helperInstalled && !model.helperApprovalPending)
+        .disabled((!model.helperInstalled && !model.helperApprovalPending) || model.helperChanging)
     }
 }
 

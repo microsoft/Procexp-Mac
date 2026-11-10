@@ -127,7 +127,7 @@ final class ActionCoordinator {
         } catch ProviderError.notPermitted {
             errorPresentation = presentation
             errorTitle = "Action Not Permitted"
-            let helperNote = model.helperInstalled
+            let helperNote = model.privileged != nil
                 ? "The privileged helper is enabled, but macOS protections can still deny access."
                 : "The privileged helper is not enabled. Enabling it can permit additional actions, but does not bypass macOS process protection."
             let niceNote = kind == .setNice

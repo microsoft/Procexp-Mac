@@ -54,7 +54,19 @@ enum PeerValidation {
         log.notice("peer pid \(pid): accepting intact ad-hoc signature in DEBUG build")
         return true
         #else
-        guard let teamIdentifier = ownTeamIdentifier() else {
+        return isOfficialPeer(code, pid: pid)
+        #endif
+    }
+
+    // Kept outside the DEBUG branch so tests can exercise the Release policy.
+    static func isOfficialPeer(
+        _ code: SecCode,
+        pid: pid_t,
+        teamIdentifier: String? = ownTeamIdentifier(),
+        checkValidity: (SecCode, SecCSFlags, SecRequirement) -> OSStatus
+            = { SecCodeCheckValidity($0, $1, $2) }
+    ) -> Bool {
+        guard let teamIdentifier, !teamIdentifier.isEmpty else {
             log.fault("could not determine helper Team ID; rejecting pid \(pid)")
             return false
         }
@@ -71,7 +83,7 @@ enum PeerValidation {
             return false
         }
 
-        let identityStatus = SecCodeCheckValidity(
+        let identityStatus = checkValidity(
             code,
             SecCSFlags(rawValue: 0),
             requirement
@@ -83,12 +95,14 @@ enum PeerValidation {
 
         log.info("peer pid \(pid): official identity requirement passed; accepted")
         return true
-        #endif
     }
 
     /// Return the Team ID from this helper's own code signature. The app must
     /// be signed by the same team, avoiding a duplicated identity constant.
-    private static func ownTeamIdentifier() -> String? {
+    static func ownTeamIdentifier(
+        copyInformation: (SecStaticCode, SecCSFlags, UnsafeMutablePointer<CFDictionary?>) -> OSStatus
+            = SecCodeCopySigningInformation
+    ) -> String? {
         var ownCode: SecCode?
         guard SecCodeCopySelf(SecCSFlags(rawValue: 0), &ownCode) == errSecSuccess,
               let ownCode else {
@@ -106,9 +120,9 @@ enum PeerValidation {
         }
 
         var signingInformation: CFDictionary?
-        guard SecCodeCopySigningInformation(
+        guard copyInformation(
             ownStaticCode,
-            SecCSFlags(rawValue: 0),
+            SecCSFlags(rawValue: kSecCSSigningInformation),
             &signingInformation
         ) == errSecSuccess,
               let information = signingInformation as? [CFString: Any] else {

@@ -1369,8 +1369,10 @@ struct StringsTab: View {
                 StringsRowsTable(strings: filtered, selection: $selectedRows)
             }
         }
-        .task(id: pid) {
-            await detail.loadStringsIfNeeded(pid: pid, data: model.data)
+        .task(id: ProcessDetailsFetchKey(pid: pid, providerGeneration: model.providerGeneration)) {
+            await detail.loadStringsIfNeeded(
+                pid: pid, data: model.data, providerGeneration: model.providerGeneration
+            )
         }
     }
 

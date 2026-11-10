@@ -12,13 +12,18 @@
 //    `ProcessRecord`-derived values (CPU, memory, threads, I/O, …) track the
 //    1s main refresh automatically (AppModel is `@Observable`).
 //  - Async details (threads, sockets, environment, strings, signature) live in
-//    a per-window `PropertiesDetail`. `.task(id: pid)` loads the static pieces
-//    once, then refreshes the dynamic lists on a ~1.5s timer while open.
+//    a per-window `PropertiesDetail`. Its task reloads when the target or data
+//    provider changes, then refreshes dynamic lists on a ~1.5s timer while open.
 //
 
 import SwiftUI
 import AppKit
 import ProcexpModel
+
+struct ProcessDetailsFetchKey: Equatable {
+    let pid: ProcessID
+    let providerGeneration: Int
+}
 
 struct ProcessPropertiesView: View {
     let pid: ProcessID
@@ -80,7 +85,7 @@ struct ProcessPropertiesView: View {
                 detail.appendHistory(record: record, at: model.snapshot.timestamp)
             }
         }
-        .task(id: pid) {
+        .task(id: ProcessDetailsFetchKey(pid: pid, providerGeneration: model.providerGeneration)) {
             let record = model.snapshot.processes[pid]
             await detail.loadStatic(
                 pid: pid,
@@ -89,6 +94,7 @@ struct ProcessPropertiesView: View {
                 signing: model.signing,
                 autostart: model.autostart
             )
+            guard !Task.isCancelled else { return }
             // Seed the rings with the first sample immediately.
             if let record { detail.appendHistory(record: record, at: model.snapshot.timestamp) }
             while !Task.isCancelled {
