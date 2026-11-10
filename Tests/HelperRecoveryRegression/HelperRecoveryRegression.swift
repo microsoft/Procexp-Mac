@@ -5,6 +5,12 @@ import ProcexpModel
 @testable import ProcexpMac
 
 private final class LocalProvider: ProcessDataProviding, Sendable {
+    let loadStrings: @Sendable () async throws -> [String]
+
+    init(loadStrings: @escaping @Sendable () async throws -> [String] = { ["local"] }) {
+        self.loadStrings = loadStrings
+    }
+
     var capabilities: ProviderCapabilities { [] }
     func snapshot() async -> ProcessSnapshot { HelperStub.snapshot(pid: 101, interval: 0) }
     func snapshots(interval: TimeInterval) -> AsyncStream<ProcessSnapshot> {
@@ -26,7 +32,16 @@ private final class LocalProvider: ProcessDataProviding, Sendable {
     func commandLine(of id: ProcessID) async throws -> String? { "local" }
     func currentDirectory(of id: ProcessID) async throws -> String? { "/local" }
     func environment(of id: ProcessID) async throws -> [String: String] { ["provider": "local"] }
-    func strings(of id: ProcessID) async throws -> [String] { ["local"] }
+    func strings(of id: ProcessID) async throws -> [String] { try await loadStrings() }
+}
+
+@MainActor
+private final class PendingStrings {
+    var requests: [CheckedContinuation<[String], Error>] = []
+
+    func load() async throws -> [String] {
+        try await withCheckedThrowingContinuation { requests.append($0) }
+    }
 }
 
 @MainActor
@@ -172,6 +187,46 @@ struct HelperRecoveryRegression {
         try check(detail.environment.first?.value == "local", "Environment did not recover")
         try check(detail.strings == ["local"] && detail.stringsNote == nil, "Failed strings lookup did not recover after provider change")
         print("PASS: command-line cache and existing process-property details recover on provider change")
+
+        for oldFinishesFirst in [true, false] {
+            for oldFails in [true, false] {
+                let pending = PendingStrings()
+                let local = LocalProvider { try await pending.load() }
+                let stringsDetail = PropertiesDetail()
+                let oldLoad = Task { await stringsDetail.loadStringsIfNeeded(pid: detailID, data: local) }
+                try await waitUntil { pending.requests.count == 1 }
+                oldLoad.cancel()
+                let replacement = Task { await stringsDetail.loadStringsIfNeeded(pid: detailID, data: local) }
+                try await waitUntil { pending.requests.count == 2 }
+
+                func finishOldLoad() {
+                    if oldFails {
+                        pending.requests[0].resume(throwing: Failure.assertion("Stale scan failed"))
+                    } else {
+                        pending.requests[0].resume(returning: ["stale"])
+                    }
+                }
+
+                if oldFinishesFirst {
+                    finishOldLoad()
+                    await oldLoad.value
+                    try check(stringsDetail.isLoadingStrings, "Cancelled load cleared replacement loading state")
+                    try check(stringsDetail.strings.isEmpty && stringsDetail.stringsNote == nil,
+                              "Cancelled load published stale results")
+                }
+                pending.requests[1].resume(returning: ["replacement"])
+                await replacement.value
+                if !oldFinishesFirst {
+                    finishOldLoad()
+                    await oldLoad.value
+                }
+                try check(!stringsDetail.isLoadingStrings && stringsDetail.strings == ["replacement"]
+                          && stringsDetail.stringsNote == nil, "Reopened Strings tab lost replacement results")
+                await stringsDetail.loadStringsIfNeeded(pid: detailID, data: LocalProvider())
+                try check(stringsDetail.strings == ["replacement"], "Old completion invalidated replacement cache")
+            }
+        }
+        print("PASS: reopening Strings replaces cancelled scans without stale results or loading-state changes")
 
         let stalled = Fixture()
         let stalledModel = stalled.model()

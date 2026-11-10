@@ -104,6 +104,7 @@ final class PropertiesDetail {
     var isLoadingStrings = false
     private var stringsLoaded = false
     private var stringsProviderGeneration: Int?
+    private var stringsLoadToken: UUID?
 
     // Image-tab derived facts (resolved once from the on-disk image).
     var buildTime: String?
@@ -208,6 +209,7 @@ final class PropertiesDetail {
         data: any ProcessDataProviding,
         providerGeneration: Int = 0
     ) async {
+        guard !Task.isCancelled else { return }
         if stringsProviderGeneration != providerGeneration {
             stringsProviderGeneration = providerGeneration
             strings = []
@@ -215,22 +217,25 @@ final class PropertiesDetail {
             stringsLoaded = false
             isLoadingStrings = false
         }
-        guard !stringsLoaded, !isLoadingStrings else { return }
+        guard !stringsLoaded else { return }
+        let token = UUID()
+        stringsLoadToken = token
         isLoadingStrings = true
         stringsNote = nil
         defer {
-            if stringsProviderGeneration == providerGeneration {
+            if stringsLoadToken == token {
+                stringsLoadToken = nil
                 isLoadingStrings = false
                 stringsLoaded = !Task.isCancelled
             }
         }
         do {
             let extracted = try await data.strings(of: pid)
-            guard !Task.isCancelled, stringsProviderGeneration == providerGeneration else { return }
+            guard !Task.isCancelled, stringsLoadToken == token else { return }
             strings = extracted
             stringsNote = extracted.isEmpty ? "No printable strings were extracted from the image." : nil
         } catch {
-            guard !Task.isCancelled, stringsProviderGeneration == providerGeneration else { return }
+            guard !Task.isCancelled, stringsLoadToken == token else { return }
             strings = []
             stringsNote = "Strings unavailable: \(describe(error))"
         }
