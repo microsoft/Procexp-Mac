@@ -32,6 +32,7 @@ struct ProcessOutlineView: NSViewRepresentable {
     let columns: [Column]
     let colorRules: [ProcessColorRule]
     let treeMode: Bool
+    var groupByCoalition: Bool = false
     let treeSortResetToken: Int
     let searchText: String
     let revealRequestToken: Int
@@ -52,13 +53,13 @@ struct ProcessOutlineView: NSViewRepresentable {
         coordinator.installColumns(columns)
         coordinator.installMenus()
         coordinator.installScrollSync()
-        coordinator.update(snapshot: snapshot, columns: columns, colorRules: colorRules, treeMode: treeMode, treeSortResetToken: treeSortResetToken, searchText: searchText, revealRequestToken: revealRequestToken)
+        coordinator.update(snapshot: snapshot, columns: columns, colorRules: colorRules, treeMode: treeMode, groupByCoalition: groupByCoalition, treeSortResetToken: treeSortResetToken, searchText: searchText, revealRequestToken: revealRequestToken)
         return container
     }
 
     func updateNSView(_ nsView: ProcessListContainerView, context: Context) {
         context.coordinator.onCommand = onCommand
-        context.coordinator.update(snapshot: snapshot, columns: columns, colorRules: colorRules, treeMode: treeMode, treeSortResetToken: treeSortResetToken, searchText: searchText, revealRequestToken: revealRequestToken)
+        context.coordinator.update(snapshot: snapshot, columns: columns, colorRules: colorRules, treeMode: treeMode, groupByCoalition: groupByCoalition, treeSortResetToken: treeSortResetToken, searchText: searchText, revealRequestToken: revealRequestToken)
     }
 
     func makeCoordinator() -> Coordinator {
@@ -100,6 +101,9 @@ struct ProcessOutlineView: NSViewRepresentable {
         private var metricColumnWidths: [Column: CGFloat] = [:]
         private var currentRules: [ProcessColorRule] = []
         private var currentTreeMode = true
+        private var currentGroupByCoalition = false
+        private var coalitionRoots: [ProcessID] = []
+        private var coalitionChildren: [ProcessID: [ProcessID]] = [:]
         private var currentTreeSortResetToken = 0
         private var currentSearchText = ""
         private var lastRestoredSelection: ProcessID?
@@ -146,6 +150,7 @@ struct ProcessOutlineView: NSViewRepresentable {
                     columns: [Column],
                     colorRules: [ProcessColorRule],
                     treeMode: Bool,
+                    groupByCoalition: Bool = false,
                     treeSortResetToken: Int,
                     searchText: String,
                     revealRequestToken: Int = 0) {
@@ -167,8 +172,16 @@ struct ProcessOutlineView: NSViewRepresentable {
             currentSearchText = searchText
             updateProcessHighlights(from: snapshot, to: newSnapshot)
             snapshot = newSnapshot
+            let groupingChanged = groupByCoalition != currentGroupByCoalition
+            currentGroupByCoalition = groupByCoalition
+            if groupByCoalition {
+                (coalitionRoots, coalitionChildren) = CoalitionResolver.groupedTree(from: snapshot.processes)
+            } else {
+                coalitionRoots = []
+                coalitionChildren = [:]
+            }
             rebuildDisplayTree()
-            if shouldAutoExpand {
+            if shouldAutoExpand || groupingChanged {
                 didInitialExpand = true
                 expanded = Set(snapshot.processes.keys)
             } else {
@@ -551,22 +564,35 @@ struct ProcessOutlineView: NSViewRepresentable {
                 displayRoots = sorted(Array(visible))
                 return
             }
-            for (parent, children) in snapshot.children {
+            for (parent, children) in treeChildren {
                 let filtered = children.filter { visible.contains($0) }
                 if !filtered.isEmpty { displayChildren[parent] = sorted(filtered) }
             }
             for (id, record) in removedProcessRecords where visible.contains(id) {
-                if let parent = record.parent, visible.contains(parent) {
+                if let parent = treeParent(of: record), visible.contains(parent) {
                     displayChildren[parent, default: []].append(id)
                     displayChildren[parent] = sorted(Array(Set(displayChildren[parent] ?? [])))
                 }
             }
             let orphanRoots = visible.filter { pid in
                 guard let record = allProcesses[pid] else { return false }
-                guard let parent = record.parent else { return true }
+                guard let parent = treeParent(of: record) else { return true }
                 return parent == pid || !visible.contains(parent)
             }
-            displayRoots = sorted(Array(Set(snapshot.roots.filter { visible.contains($0) }).union(orphanRoots)))
+            displayRoots = sorted(Array(Set(treeRoots.filter { visible.contains($0) }).union(orphanRoots)))
+        }
+
+        /// Hierarchy source: BSD parent tree, or the coalition grouping.
+        private var treeRoots: [ProcessID] {
+            currentGroupByCoalition ? coalitionRoots : snapshot.roots
+        }
+
+        private var treeChildren: [ProcessID: [ProcessID]] {
+            currentGroupByCoalition ? coalitionChildren : snapshot.children
+        }
+
+        private func treeParent(of record: ProcessRecord) -> ProcessID? {
+            currentGroupByCoalition ? CoalitionResolver.groupParent(of: record) : record.parent
         }
 
         private func displayedProcesses() -> [ProcessID: ProcessRecord] {
@@ -581,16 +607,28 @@ struct ProcessOutlineView: NSViewRepresentable {
             var visible = Set<ProcessID>()
             let processes = displayedProcesses()
             for (pid, record) in processes {
-                if record.name.lowercased().contains(query) || String(pid.pid).contains(query) {
+                if matches(record, query) {
                     visible.insert(pid)
-                    var ancestor = record.parent
+                    var ancestor = treeParent(of: record)
                     while let current = ancestor, processes[current] != nil, !visible.contains(current) {
                         visible.insert(current)
-                        ancestor = processes[current]?.parent
+                        ancestor = processes[current].flatMap(treeParent(of:))
                     }
                 }
             }
             return visible
+        }
+
+        /// Name or PID match. When grouping by coalition, a match on the
+        /// leader's name also matches its members, so filtering for an app
+        /// shows the XPC services and extensions working for it.
+        private func matches(_ record: ProcessRecord, _ query: String) -> Bool {
+            if record.name.lowercased().contains(query) || String(record.id.pid).contains(query) {
+                return true
+            }
+            guard currentGroupByCoalition, let coalition = record.coalition, coalition.isShared,
+                  let leaderName = coalition.leaderName else { return false }
+            return leaderName.lowercased().contains(query)
         }
 
         private func sorted(_ ids: [ProcessID]) -> [ProcessID] {
@@ -1193,12 +1231,12 @@ struct ProcessOutlineView: NSViewRepresentable {
         }
 
         private func expandAncestors(of pid: ProcessID) {
-            var ancestor = snapshot.processes[pid]?.parent
+            var ancestor = snapshot.processes[pid].flatMap(treeParent(of:))
             var seen = Set<ProcessID>()
             while let current = ancestor, snapshot.processes[current] != nil, !seen.contains(current) {
                 expanded.insert(current)
                 seen.insert(current)
-                ancestor = snapshot.processes[current]?.parent
+                ancestor = snapshot.processes[current].flatMap(treeParent(of:))
             }
         }
 

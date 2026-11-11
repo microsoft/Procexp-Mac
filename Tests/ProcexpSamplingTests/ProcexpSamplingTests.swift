@@ -122,3 +122,25 @@ struct ProcexpSamplingTests {
         #expect(LibprocDataProvider().capabilities.contains(.accurateCPU))
     }
 }
+
+@Suite("W1 coalition sampling")
+struct CoalitionSamplingTests {
+    @Test("Reads the current process's coalition IDs without privileges")
+    func readsOwnCoalition() throws {
+        let coalition = try #require(Libproc.coalition(getpid()))
+        #expect(coalition.jetsamID != 0)
+    }
+
+    @Test("Struct layout matches xnu proc_pidcoalitioninfo (5 x uint64)")
+    func layout() {
+        #expect(MemoryLayout<Libproc.ProcPIDCoalitionInfo>.size == 40)
+    }
+
+    @Test("Snapshot records carry resolved coalitions")
+    func snapshotHasCoalitions() async {
+        let snap = await LibprocDataProvider().snapshot()
+        let withCoalition = snap.processes.values.filter { $0.coalition?.role != nil }
+        #expect(withCoalition.count > snap.processes.count / 2)
+        #expect(snap.processes.values.contains { $0.coalition?.role == .leader && $0.coalition?.isShared == true })
+    }
+}

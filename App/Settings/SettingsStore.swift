@@ -30,6 +30,7 @@ enum SettingsStore {
         static let verifySignatures   = "settings.verifySignatures"
         static let highlightDuration  = "settings.differenceHighlightDuration"
         static let showLowerPane      = "settings.showLowerPane"
+        static let groupByCoalition   = "settings.groupByCoalition"
         static let heatmaps           = "settings.showColumnHeatmaps"
         static let scrollToNew        = "settings.scrollToNewProcesses"
         static let allUsers           = "settings.showProcessesFromAllUsers"
@@ -98,6 +99,9 @@ enum SettingsStore {
         if defaults.object(forKey: Key.showLowerPane) != nil {
             model.showLowerPane = defaults.bool(forKey: Key.showLowerPane)
         }
+        if defaults.object(forKey: Key.groupByCoalition) != nil {
+            model.groupByCoalition = defaults.bool(forKey: Key.groupByCoalition)
+        }
         if defaults.object(forKey: Key.heatmaps) != nil {
             model.showColumnHeatmaps = defaults.bool(forKey: Key.heatmaps)
         }
@@ -138,6 +142,7 @@ enum SettingsStore {
         defaults.set(model.verifySignatures, forKey: Key.verifySignatures)
         defaults.set(model.differenceHighlightDuration, forKey: Key.highlightDuration)
         defaults.set(model.showLowerPane, forKey: Key.showLowerPane)
+        defaults.set(model.groupByCoalition, forKey: Key.groupByCoalition)
         defaults.set(model.showColumnHeatmaps, forKey: Key.heatmaps)
         defaults.set(model.scrollToNewProcesses, forKey: Key.scrollToNew)
         defaults.set(model.showProcessesFromAllUsers, forKey: Key.allUsers)

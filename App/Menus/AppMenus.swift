@@ -117,6 +117,12 @@ private struct ViewMenu: View {
             set: { model.setProcessTreeView($0) }
         ))
             .keyboardShortcut("t", modifiers: .option)
+        Toggle("Group by Coalition", isOn: Binding(
+            get: { model.showProcessTree && model.groupByCoalition },
+            set: { model.setGroupByCoalition($0) }
+        ))
+            .keyboardShortcut("c", modifiers: .option)
+            .help("Show XPC services and extensions under the app they work for (jetsam coalition). Leaders and roles are inferred.")
         Toggle("Show Column Heatmaps", isOn: $model.showColumnHeatmaps)
         Toggle("Scroll to New Processes", isOn: $model.scrollToNewProcesses)
         Toggle("Show Processes From All Users", isOn: $model.showProcessesFromAllUsers)

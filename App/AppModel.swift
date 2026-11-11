@@ -135,6 +135,28 @@ final class AppModel {
         processTreeSortResetToken += 1
     }
 
+    /// Nest XPC services / extensions under the app whose jetsam coalition
+    /// they belong to, instead of under their BSD parent (usually launchd).
+    /// Only applies while the tree is shown; turning it on shows the tree.
+    var groupByCoalition: Bool = false { didSet { persistSettings() } }
+
+    func setGroupByCoalition(_ enabled: Bool) {
+        groupByCoalition = enabled
+        if enabled {
+            showProcessTree = true
+            // Make the grouping legible: show who leads and what role each row
+            // plays, right after the pinned PID column. Users can remove them.
+            let missing = [Column.coalitionRole, .coalitionLeader].filter { !columns.contains($0) }
+            if !missing.isEmpty {
+                var updated = columns
+                let insertAt = (updated.firstIndex(of: .pid).map { $0 + 1 }) ?? updated.endIndex
+                updated.insert(contentsOf: missing, at: insertAt)
+                columns = updated
+            }
+        }
+        processTreeSortResetToken += 1
+    }
+
     // R1 — user-adjustable widths (points) of the three toolbar mini history
     // graphs (CPU, Memory, I/O). Each graph has a drag handle on its trailing
     // edge that writes back into this array.

@@ -60,6 +60,8 @@ public struct ProcessRecordDTO: Codable, Sendable {
     public var nice: Int32
     public var priority: Int32
     public var flags: ProcessFlags
+    /// Optional so an older helper (no coalition data) still decodes.
+    public var coalition: CoalitionMembership?
     public var startTimeDate: Date
 
     public init(_ r: ProcessRecord) {
@@ -106,6 +108,7 @@ public struct ProcessRecordDTO: Codable, Sendable {
         nice = r.nice
         priority = r.priority
         flags = r.flags
+        coalition = r.coalition
         startTimeDate = r.startTimeDate
     }
 
@@ -154,6 +157,7 @@ public struct ProcessRecordDTO: Codable, Sendable {
             nice: nice,
             priority: priority,
             flags: flags,
+            coalition: coalition,
             startTimeDate: startTimeDate
         )
     }

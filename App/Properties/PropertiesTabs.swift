@@ -359,6 +359,10 @@ struct ImageTab: View {
                 }
             }
 
+            if let coalition = record.coalition {
+                coalitionSection(coalition)
+            }
+
             Spacer(minLength: 0)
             buttonRow
         }
@@ -420,6 +424,72 @@ struct ImageTab: View {
             Button("Reveal in Finder") { reveal() }
                 .disabled((record.executablePath ?? "").isEmpty)
         }
+    }
+
+    // MARK: Coalition
+
+    /// Jetsam coalition: the app this process works for and its siblings.
+    /// Role and leader are inferred (only Endpoint Security reports them).
+    @ViewBuilder private func coalitionSection(_ coalition: CoalitionMembership) -> some View {
+        Section(title: "Coalition") {
+            Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 3) {
+                InfoRow(label: "Jetsam ID", value: String(coalition.jetsamID))
+                InfoRow(label: "Resource ID", value: String(coalition.resourceID))
+                if coalition.isShared {
+                    InfoRow(label: "Role (inferred)", value: coalition.role?.title ?? "—")
+                    InfoRow(label: "Leader (inferred)",
+                            value: coalition.leader.map { parentText($0) } ?? "None detected")
+                } else {
+                    InfoRow(label: "Members", value: "Only this process")
+                }
+            }
+            if coalition.isShared {
+                let members = coalitionMembers(coalition.jetsamID)
+                Text("\(members.count) members")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 4)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(members, id: \.id) { member in
+                            Button {
+                                model.revealProcess(member.id)
+                            } label: {
+                                HStack(spacing: 6) {
+                                    Text(member.name).fontWeight(member.id == pid ? .semibold : .regular)
+                                    Text("\(member.id.pid)").foregroundStyle(.secondary).monospacedDigit()
+                                    Text(member.coalition?.role?.title ?? "")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                    Spacer(minLength: 0)
+                                }
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .help("Select \(member.name) in the process list")
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: 140)
+            }
+        }
+    }
+
+    /// Live members of a jetsam coalition: leader first, then by role, then PID.
+    private func coalitionMembers(_ jetsamID: UInt64) -> [ProcessRecord] {
+        func rank(_ r: ProcessRecord) -> Int {
+            switch r.coalition?.role {
+            case .leader: return 0
+            case .member: return 1
+            case .xpcService: return 2
+            case .appExtension: return 3
+            case nil: return 4
+            }
+        }
+        return model.snapshot.processes.values
+            .filter { $0.coalition?.jetsamID == jetsamID }
+            .sorted { rank($0) != rank($1) ? rank($0) < rank($1) : $0.id.pid < $1.id.pid }
     }
 
     private func parentText(_ parent: ProcessID) -> String {

@@ -108,6 +108,9 @@ public final class LibprocDataProvider: ProcessDataProviding, Sendable {
             records[id]?.cpuPercent = pct
         }
 
+        // Infer coalition roles/leaders now that parents and paths are known.
+        CoalitionResolver.resolve(&records)
+
         let (roots, children) = ProcessTreeBuilder.build(from: records)
 
         let system = SystemStats(
@@ -246,6 +249,7 @@ public final class LibprocDataProvider: ProcessDataProviding, Sendable {
             nice: bsd.pbi_nice,
             priority: task.priority,
             flags: flags,
+            coalition: Libproc.coalition(pid),
             startTimeDate: startDate
         )
         return BuiltRecord(record: record, ppid: ppid)    }
@@ -328,6 +332,7 @@ public final class LibprocDataProvider: ProcessDataProviding, Sendable {
             nice: 0,
             priority: task.priority,
             flags: flags,
+            coalition: Libproc.coalition(pid),
             startTimeDate: .distantPast
         )
         return BuiltRecord(record: record, ppid: ppid)
