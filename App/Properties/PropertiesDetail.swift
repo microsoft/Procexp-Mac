@@ -103,6 +103,8 @@ final class PropertiesDetail {
     var stringsNote: String?
     var isLoadingStrings = false
     private var stringsLoaded = false
+    private var stringsProviderGeneration: Int?
+    private var stringsLoadToken: UUID?
 
     // Image-tab derived facts (resolved once from the on-disk image).
     var buildTime: String?
@@ -149,11 +151,6 @@ final class PropertiesDetail {
         signing: any SigningProviding,
         autostart: any AutostartProviding
     ) async {
-        strings = []
-        stringsNote = nil
-        stringsLoaded = false
-        isLoadingStrings = false
-
         if let record {
             securityIdentity = Self.securityIdentity(pid: pid, record: record)
         } else {
@@ -161,11 +158,16 @@ final class PropertiesDetail {
             securityCode = nil
         }
 
-        commandLine = (try? await data.commandLine(of: pid)) ?? nil
-        currentDirectory = (try? await data.currentDirectory(of: pid)) ?? nil
+        let loadedCommandLine = try? await data.commandLine(of: pid)
+        guard !Task.isCancelled else { return }
+        commandLine = loadedCommandLine
+        let loadedDirectory = try? await data.currentDirectory(of: pid)
+        guard !Task.isCancelled else { return }
+        currentDirectory = loadedDirectory
 
         do {
             let env = try await data.environment(of: pid)
+            guard !Task.isCancelled else { return }
             environment = env
                 .map { EnvVar(id: $0.key, value: $0.value) }
                 .sorted { $0.id.lowercased() < $1.id.lowercased() }
@@ -173,6 +175,7 @@ final class PropertiesDetail {
                 ? "No environment variables were returned. The environment may be empty, the process may have exited, or macOS may have restricted access. Helper access does not bypass process protection."
                 : nil
         } catch {
+            guard !Task.isCancelled else { return }
             environment = []
             environmentNote = "Environment unavailable: \(describe(error))"
         }
@@ -201,19 +204,38 @@ final class PropertiesDetail {
         }
     }
 
-    func loadStringsIfNeeded(pid: ProcessID, data: any ProcessDataProviding) async {
-        guard !stringsLoaded, !isLoadingStrings else { return }
+    func loadStringsIfNeeded(
+        pid: ProcessID,
+        data: any ProcessDataProviding,
+        providerGeneration: Int = 0
+    ) async {
+        guard !Task.isCancelled else { return }
+        if stringsProviderGeneration != providerGeneration {
+            stringsProviderGeneration = providerGeneration
+            strings = []
+            stringsNote = nil
+            stringsLoaded = false
+            isLoadingStrings = false
+        }
+        guard !stringsLoaded else { return }
+        let token = UUID()
+        stringsLoadToken = token
         isLoadingStrings = true
         stringsNote = nil
         defer {
-            isLoadingStrings = false
-            stringsLoaded = true
+            if stringsLoadToken == token {
+                stringsLoadToken = nil
+                isLoadingStrings = false
+                stringsLoaded = !Task.isCancelled
+            }
         }
         do {
             let extracted = try await data.strings(of: pid)
+            guard !Task.isCancelled, stringsLoadToken == token else { return }
             strings = extracted
             stringsNote = extracted.isEmpty ? "No printable strings were extracted from the image." : nil
         } catch {
+            guard !Task.isCancelled, stringsLoadToken == token else { return }
             strings = []
             stringsNote = "Strings unavailable: \(describe(error))"
         }

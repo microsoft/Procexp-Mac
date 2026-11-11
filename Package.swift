@@ -67,5 +67,6 @@ let package = Package(
         .executableTarget(name: "ProcexpHelper", dependencies: [
             "ProcexpModel", "ProcexpSampling", "ProcexpPrivileged",
         ]),
+        .testTarget(name: "ProcexpHelperTests", dependencies: ["ProcexpHelper"]),
     ]
 )

@@ -106,10 +106,11 @@ struct LowerPaneView: View {
     private struct FetchKey: Equatable {
         let pid: ProcessID?
         let mode: LowerPaneMode
+        let providerGeneration: Int
     }
 
     private var fetchKey: FetchKey {
-        FetchKey(pid: model.selection, mode: model.lowerPaneMode)
+        FetchKey(pid: model.selection, mode: model.lowerPaneMode, providerGeneration: model.providerGeneration)
     }
 
     var body: some View {

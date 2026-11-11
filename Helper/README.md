@@ -48,6 +48,21 @@ error message. These diagnostics do not install or sign the helper.
   peer's `SecCode` and runs `SecCodeCheckValidity`. Debug builds accept an
   intact ad-hoc signature for local testing; Release builds require the
   official app identifier and Microsoft Developer ID Team ID.
+  The helper requests `kSecCSSigningInformation` when reading its own Team ID;
+  passing zero flags omits that metadata even for a valid Developer ID signature.
+  Missing Team ID metadata still fails closed.
+- **Activation and recovery:** registration/approval does not prove that the
+  helper can serve requests. On startup and installation/retry, the app verifies
+  a nonempty, decodable helper snapshot before switching process data and actions.
+  If verification or a later streamed/manual refresh fails, the app reports the
+  reason and uses local sampling, details, and actions instead of publishing an
+  empty helper snapshot. Open detail views reload when providers change.
+  An enabled but unreachable helper remains uninstallable, and the app menu
+  offers **Retry Privileged Helper…**. Approval-pending registrations remain a
+  separate state; approve in System Settings and relaunch.
+- **Bounded requests:** every XPC reply shape (snapshot/detail/action) has a
+  five-second deadline and supports task cancellation. Timed-out connections are
+  discarded; late/duplicate replies cannot resume a continuation twice.
 
 The two installable flavors use separate identities throughout:
 
@@ -99,9 +114,9 @@ daemon process.
 6. **Registration** then works: the app's `Install Privileged Helper…` menu item
    calls `SMAppService.daemon(plistName:).register()`. The user approves the
    daemon in *System Settings ▸ General ▸ Login Items & Extensions*, after which
-   `PrivilegedDataProvider.isHelperInstalled()` returns `true` and the app adopts
-   the privileged provider automatically on next launch (or immediately, on a
-   successful install).
+   `PrivilegedDataProvider.isHelperInstalled()` returns `true`. The app then
+   verifies a helper snapshot before adopting privileged access on next launch
+   (or immediately after installation).
 
 ## Files
 
@@ -117,3 +132,19 @@ An ad-hoc build can run without the helper but cannot register it. Use
 tuple, or pass a Developer ID identity to that script for the official tuple.
 The two launchd labels can coexist and are removed independently by
 `Scripts/dev_uninstall_helper.sh`.
+
+Regression checks that do not register a daemon or change system approvals:
+
+```sh
+swift test --filter 'HelperClientTests|PeerValidationTests|PrivilegedDTOTests'
+swift test -c release --filter 'HelperClientTests|PeerValidationTests|PrivilegedDTOTests'
+bash Scripts/test_helper_recovery.sh
+```
+
+The app harness uses injected service state and helper replies to cover startup,
+relaunch, installation, approval, explicit retry, ongoing/manual-refresh failure,
+timeout, cancellation, and local detail/action recovery. Policy tests exercise
+the Release requirement even in Debug tests, verify the signing-information flag,
+and reject an actual non-official test peer. Successful Developer-ID-signed
+app/helper acceptance still requires a separately packaged and signed end-to-end
+test; simulated requirement success is not a substitute for that release check.

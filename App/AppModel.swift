@@ -239,19 +239,22 @@ final class AppModel {
     /// into `actions` so control operations can escalate.
     private(set) var privileged: PrivilegedDataProvider?
 
-    /// Whether the privileged helper is installed/enabled. Observable so menu
-    /// items (e.g. "Install Privileged Helper…") can disable themselves once the
-    /// helper is present.
+    /// Registration state, independent of verified reachability. Retained after
+    /// connection failure so removal remains available.
     private(set) var helperInstalled: Bool = false
     private(set) var helperApprovalPending: Bool = false
+    private(set) var helperChanging = false
+    private(set) var helperFailure: String?
+    private let helperConnection: HelperConnection
+    private var helperCandidate: PrivilegedDataProvider?
+    private(set) var providerGeneration = 0
 
     /// The always-available unprivileged provider, kept for fallback.
-    private let libproc: LibprocDataProvider
+    private let libproc: any ProcessDataProviding
     private let gpuStats = GPUStatsProvider()
     let dependencies = AppDependencies()
 
-    /// W8 process-control command layer. Carries the privileged helper (when
-    /// installed) so actions on other users' processes can escalate.
+    /// W8 process-control command layer. Carries only a verified helper.
     private(set) var actions: ProcessActions
     let autostart: any AutostartProviding
 
@@ -280,34 +283,30 @@ final class AppModel {
     private let maxConcurrentAutostartLookups = 8
     private let maxNewAutostartLookupsPerRefresh = 32
 
-    init() {
-        let libproc = LibprocDataProvider()
+    init(
+        localProvider libproc: any ProcessDataProviding = LibprocDataProvider(),
+        helperConnection: HelperConnection? = nil,
+        settingsEnabled: Bool = true
+    ) {
+        let helperConnection = helperConnection ?? .live
         self.libproc = libproc
+        self.helperConnection = helperConnection
         self.signing = CodeSignProvider()
         self.network = NetworkProvider()
         self.system = SystemStatsProvider()
         self.autostart = AutostartProvider()
 
-        // W2 — adopt the privileged path if the root helper is already
-        // installed; otherwise run fully unprivileged (current behavior).
-        if PrivilegedDataProvider.isHelperInstalled() {
-            let priv = PrivilegedDataProvider()
-            self.privileged = priv
-            self.data = priv
-            self.actions = ProcessActions(privileged: priv)
-            self.helperInstalled = true
-        } else {
-            self.privileged = nil
-            self.data = libproc
-            self.actions = ProcessActions(privileged: nil)
-            self.helperInstalled = false
-            self.helperApprovalPending = PrivilegedDataProvider.helperRequiresApproval()
-        }
+        self.data = libproc
+        self.actions = ProcessActions(privileged: nil)
+        let status = helperConnection.status()
+        self.helperInstalled = status == .enabled
+        self.helperApprovalPending = status == .requiresApproval
+        self.helperCandidate = helperInstalled ? helperConnection.makeProvider() : nil
 
         // W11 — restore persisted preferences, then start tracking changes.
-        SettingsStore.load(into: self)
+        if settingsEnabled { SettingsStore.load(into: self) }
         refreshLoginItemStatus()
-        settingsLoaded = true
+        settingsLoaded = settingsEnabled
     }
 
     /// W2 — attempt to register the privileged root helper via `SMAppService`.
@@ -318,9 +317,15 @@ final class AppModel {
     /// explicit user approval in System Settings. It never crashes; any failure
     /// is surfaced as a clean message and the app stays unprivileged.
     func installPrivilegedHelper() async -> (ok: Bool, message: String) {
+        guard !helperChanging else { return (false, "A helper operation is already in progress.") }
+        helperChanging = true
+        defer { helperChanging = false }
         do {
-            try await PrivilegedDataProvider.installHelper()
+            if helperConnection.status() != .enabled {
+                try await helperConnection.register()
+            }
         } catch {
+            refreshHelperStatus()
             return (false, """
             The privileged helper could not be registered.
 
@@ -333,8 +338,8 @@ final class AppModel {
             """)
         }
 
-        guard PrivilegedDataProvider.isHelperInstalled() else {
-            self.helperApprovalPending = PrivilegedDataProvider.helperRequiresApproval()
+        refreshHelperStatus()
+        guard helperInstalled else {
             if helperApprovalPending {
                 return (true, """
                 The helper is registered and awaiting user approval, not yet enabled. \
@@ -345,14 +350,14 @@ final class AppModel {
             return (false, "Helper registration returned, but no enabled helper is available. The app is still using unprivileged access.")
         }
 
-        // Adopt the privileged path.
-        let priv = PrivilegedDataProvider()
-        self.privileged = priv
-        self.data = priv
-        self.actions = ProcessActions(privileged: priv)
-        self.helperInstalled = true
-        self.helperApprovalPending = false
+        providerDidChange()
+        helperCandidate = helperConnection.makeProvider()
+        // Verify even when sampling is paused; registration is not reachability.
+        await forceRefresh()
         await start()
+        guard privileged != nil else {
+            return (false, helperFailure ?? "The helper could not be reached. The app is still using unprivileged access.")
+        }
         return (true, "The privileged helper is registered and enabled. Access to individual processes and thread details still depends on macOS permissions and process protection. Stack capture, process-memory strings, and privileged sampling are not implemented.")
     }
 
@@ -360,22 +365,86 @@ final class AppModel {
     /// the app manages its own daemon registration) and revert to the
     /// unprivileged provider. Useful for testing the first-install flow.
     func uninstallPrivilegedHelper() async -> (ok: Bool, message: String) {
+        guard !helperChanging else { return (false, "A helper operation is already in progress.") }
+        helperChanging = true
+        defer { helperChanging = false }
         do {
-            try await PrivilegedDataProvider.uninstallHelper()
+            try await helperConnection.unregister()
         } catch {
+            refreshHelperStatus()
             return (false, "The privileged helper could not be unregistered: \(error.localizedDescription)")
         }
 
         // Revert to the always-available unprivileged path.
-        self.privileged = nil
-        self.data = libproc
-        self.actions = ProcessActions(privileged: nil)
-        self.helperInstalled = false
-        self.helperApprovalPending = false
+        useLocalProvider()
+        helperFailure = nil
+        refreshHelperStatus()
+        await forceRefresh()
         await start()
         return (true, "The privileged helper has been removed. The app is now running unprivileged.")
     }
 
+    private func refreshHelperStatus() {
+        let status = helperConnection.status()
+        helperInstalled = status == .enabled
+        helperApprovalPending = status == .requiresApproval
+    }
+
+    private func useLocalProvider() {
+        providerDidChange()
+        helperCandidate = nil
+        privileged = nil
+        data = libproc
+        actions = ProcessActions(privileged: nil)
+    }
+
+    private func providerDidChange() {
+        providerGeneration += 1
+        commandLineCache.removeAll()
+        commandLineInFlight.removeAll()
+    }
+
+    private func sampleSnapshot() async -> ProcessSnapshot {
+        while true {
+            guard let helper = helperCandidate ?? privileged else { return await libproc.snapshot() }
+            let generation = providerGeneration
+            do {
+                let snapshot = try await helper.checkedSnapshot()
+                guard !Task.isCancelled else { return await libproc.snapshot() }
+                guard providerGeneration == generation else { continue }
+                if privileged !== helper {
+                    providerDidChange()
+                    privileged = helper
+                    helperCandidate = nil
+                    data = helper
+                    actions = ProcessActions(privileged: helper)
+                    helperFailure = nil
+                    if processActionAlert?.title == "Privileged Helper Unavailable" {
+                        processActionAlert = nil
+                    }
+                }
+                return snapshot
+            } catch {
+                guard !Task.isCancelled else { return await libproc.snapshot() }
+                guard providerGeneration == generation else { continue }
+                useLocalProvider()
+                refreshHelperStatus()
+                let message = """
+                \(error.localizedDescription)
+
+                The app has switched to unprivileged access for process sampling, details, \
+                and actions. You can retry the helper or uninstall it from the app menu. \
+                If approval is pending, approve it in System Settings > General > Login Items & Extensions.
+                """
+                helperFailure = message
+                // Explicit installs already present their result in a modal alert.
+                if !helperChanging {
+                    processActionAlert = ProcessActionAlert(title: "Privileged Helper Unavailable", message: message)
+                }
+                return await libproc.snapshot()
+            }
+        }
+    }
 
     /// Persist the current settings whenever an observed value changes. No-op
     /// until the initial load has completed.
@@ -653,11 +722,10 @@ final class AppModel {
             streamTask = nil
             return
         }
-        let provider: any ProcessDataProviding = data
-        let interval = refreshInterval
+        let stream = samplingSnapshots(interval: refreshInterval)
         let system = self.system
         streamTask = Task { @MainActor in
-            for await snap in provider.snapshots(interval: interval) {
+            for await snap in stream {
                 guard !Task.isCancelled, self.streamGeneration == generation else { return }
                 self.publicationGeneration += 1
                 let publication = self.publicationGeneration
@@ -671,6 +739,31 @@ final class AppModel {
 
                 if Task.isCancelled { break }
             }
+        }
+    }
+
+    private func samplingSnapshots(interval: TimeInterval) -> AsyncStream<ProcessSnapshot> {
+        guard helperCandidate != nil || privileged != nil else {
+            return libproc.snapshots(interval: interval)
+        }
+        return AsyncStream { continuation in
+            let task = Task { @MainActor in
+                while !Task.isCancelled, self.helperCandidate != nil || self.privileged != nil {
+                    let snapshot = await self.sampleSnapshot()
+                    guard !Task.isCancelled else { continuation.finish(); return }
+                    continuation.yield(snapshot)
+                    do { try await Task.sleep(for: .seconds(interval)) }
+                    catch { continuation.finish(); return }
+                }
+                if !Task.isCancelled {
+                    for await snapshot in self.libproc.snapshots(interval: interval) {
+                        guard !Task.isCancelled else { break }
+                        continuation.yield(snapshot)
+                    }
+                }
+                continuation.finish()
+            }
+            continuation.onTermination = { _ in task.cancel() }
         }
     }
 
@@ -696,8 +789,7 @@ final class AppModel {
         let generation = streamGeneration
         publicationGeneration += 1
         let publication = publicationGeneration
-        let provider: any ProcessDataProviding = data
-        let snap = await provider.snapshot()
+        let snap = await sampleSnapshot()
         guard !Task.isCancelled, streamGeneration == generation,
               publicationGeneration == publication else { return }
         let stats = await system.stats()
@@ -1044,8 +1136,10 @@ final class AppModel {
             commandLineInFlight.insert(id)
             startedThisRefresh += 1
             let data = self.data
+            let generation = providerGeneration
             Task { @MainActor in
                 let value = (try? await data.commandLine(of: id)) ?? ""
+                guard self.providerGeneration == generation else { return }
                 self.commandLineCache[id] = value
                 self.commandLineInFlight.remove(id)
             }

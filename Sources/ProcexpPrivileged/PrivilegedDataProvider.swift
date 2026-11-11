@@ -10,13 +10,13 @@
 //  Installation is handled via `SMAppService.daemon(plistName:)`. Under the
 //  current ad-hoc ("Sign to Run Locally") signature, `register()` will fail —
 //  that is expected until the app is Developer-ID signed (W13). Every such
-//  failure is surfaced cleanly as `ProviderError.helperUnavailable`; nothing
-//  here traps.
+//  failure is surfaced as a ProviderError with its underlying diagnostic.
 //
 
 import Foundation
 import ServiceManagement
 import ProcexpModel
+import os
 
 /// A `PrivilegedSampling` provider backed by the root helper daemon.
 ///
@@ -27,8 +27,24 @@ public final class PrivilegedDataProvider: PrivilegedSampling, @unchecked Sendab
 
     private let lock = NSLock()
     private var connection: NSXPCConnection?
+    private let requestTimeout: TimeInterval
+    private let proxyProvider: ((@escaping (Error) -> Void) -> ProcexpHelperProtocol?)?
+    private static let log = Logger(subsystem: HelperConstants.machServiceName, category: "client")
 
-    public init() {}
+    public init() {
+        requestTimeout = 5
+        proxyProvider = nil
+    }
+
+    deinit { connection?.invalidate() }
+
+    init(
+        requestTimeout: TimeInterval,
+        proxyProvider: @escaping (@escaping (Error) -> Void) -> ProcexpHelperProtocol?
+    ) {
+        self.requestTimeout = requestTimeout
+        self.proxyProvider = proxyProvider
+    }
 
     public var capabilities: ProviderCapabilities {
         [.crossUser, .accurateCPU, .fullEnvironment, .modules]
@@ -97,14 +113,23 @@ public final class PrivilegedDataProvider: PrivilegedSampling, @unchecked Sendab
         }
     }
 
-    /// One-shot snapshot. `ProcessDataProviding.snapshot()` is non-throwing, so
-    /// an unreachable helper degrades to `.empty` (the app treats that as a cue
-    /// to fall back to the unprivileged provider).
+    /// Compatibility with the non-throwing provider contract. AppModel uses
+    /// checkedSnapshot() so failures trigger local fallback, never publication.
     public func snapshot() async -> ProcessSnapshot {
-        guard let data = try? await callData({ $0.snapshot(withReply: $1) }),
-              let dto = try? JSONDecoder().decode(ProcessSnapshotDTO.self, from: data)
-        else { return .empty }
-        return dto.model
+        do { return try await checkedSnapshot() }
+        catch {
+            Self.log.error("Helper snapshot failed: \(error.localizedDescription, privacy: .public)")
+            return .empty
+        }
+    }
+
+    public func checkedSnapshot() async throws -> ProcessSnapshot {
+        let data = try await requireData { $0.snapshot(withReply: $1) }
+        let snapshot = try Self.decode(ProcessSnapshotDTO.self, data).model
+        guard !snapshot.processes.isEmpty else {
+            throw ProviderError.underlying("The privileged helper returned an empty process snapshot.")
+        }
+        return snapshot
     }
 
     public func threads(of id: ProcessID) async throws -> [ThreadInfo] {
@@ -182,9 +207,9 @@ public final class PrivilegedDataProvider: PrivilegedSampling, @unchecked Sendab
             options: .privileged
         )
         connection.remoteObjectInterface = NSXPCInterface(with: ProcexpHelperProtocol.self)
-        let clear: @Sendable () -> Void = { [weak self] in
-            guard let self else { return }
-            self.lock.lock(); self.connection = nil; self.lock.unlock()
+        let clear: () -> Void = { [weak self, weak connection] in
+            guard let self, let connection else { return }
+            self.discard(connection)
         }
         connection.interruptionHandler = clear
         connection.invalidationHandler = clear
@@ -193,20 +218,20 @@ public final class PrivilegedDataProvider: PrivilegedSampling, @unchecked Sendab
         return connection
     }
 
+    private func discard(_ connection: NSXPCConnection) {
+        lock.lock()
+        if self.connection === connection { self.connection = nil }
+        lock.unlock()
+        connection.invalidate()
+    }
+
     // MARK: - Reply-block → async bridges
 
     /// Bridge a `(Data?, Error?)` reply block, returning the raw `Data?`.
     private func callData(
         _ body: @escaping (ProcexpHelperProtocol, @escaping (Data?, Error?) -> Void) -> Void
     ) async throws -> Data? {
-        let connection = proxyConnection()
-        return try await withCheckedThrowingContinuation { raw in
-            let box = ContinuationBox(raw)
-            guard let proxy = connection.remoteObjectProxyWithErrorHandler({ _ in
-                box.resume(throwing: ProviderError.helperUnavailable)
-            }) as? ProcexpHelperProtocol else {
-                box.resume(throwing: ProviderError.helperUnavailable); return
-            }
+        try await request { proxy, box in
             body(proxy) { data, error in
                 if let error { box.resume(throwing: Self.map(error)) }
                 else { box.resume(returning: data) }
@@ -226,14 +251,7 @@ public final class PrivilegedDataProvider: PrivilegedSampling, @unchecked Sendab
     private func callString(
         _ body: @escaping (ProcexpHelperProtocol, @escaping (String?, Error?) -> Void) -> Void
     ) async throws -> String? {
-        let connection = proxyConnection()
-        return try await withCheckedThrowingContinuation { raw in
-            let box = ContinuationBox(raw)
-            guard let proxy = connection.remoteObjectProxyWithErrorHandler({ _ in
-                box.resume(throwing: ProviderError.helperUnavailable)
-            }) as? ProcexpHelperProtocol else {
-                box.resume(throwing: ProviderError.helperUnavailable); return
-            }
+        try await request { proxy, box in
             body(proxy) { value, error in
                 if let error { box.resume(throwing: Self.map(error)) }
                 else { box.resume(returning: value) }
@@ -245,18 +263,44 @@ public final class PrivilegedDataProvider: PrivilegedSampling, @unchecked Sendab
     private func callVoid(
         _ body: @escaping (ProcexpHelperProtocol, @escaping (Error?) -> Void) -> Void
     ) async throws {
-        let connection = proxyConnection()
-        try await withCheckedThrowingContinuation { (raw: CheckedContinuation<Void, Error>) in
-            let box = ContinuationBox(raw)
-            guard let proxy = connection.remoteObjectProxyWithErrorHandler({ _ in
-                box.resume(throwing: ProviderError.helperUnavailable)
-            }) as? ProcexpHelperProtocol else {
-                box.resume(throwing: ProviderError.helperUnavailable); return
-            }
+        try await request { (proxy, box: ContinuationBox<Void>) in
             body(proxy) { error in
                 if let error { box.resume(throwing: Self.map(error)) }
                 else { box.resume(returning: ()) }
             }
+        }
+    }
+
+    private func request<T>(
+        _ body: @escaping (ProcexpHelperProtocol, ContinuationBox<T>) -> Void
+    ) async throws -> T {
+        let box = ContinuationBox<T>()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { raw in
+                guard box.install(raw) else { return }
+                let connection = proxyProvider == nil ? proxyConnection() : nil
+                box.scheduleTimeout(after: requestTimeout) { [weak self] in
+                    if let connection { self?.discard(connection) }
+                }
+                let onError: (Error) -> Void = { error in
+                    box.resume(throwing: ProviderError.underlying(
+                        "Could not communicate with the privileged helper: \(error.localizedDescription)"
+                    ))
+                }
+                let proxy: ProcexpHelperProtocol?
+                if let proxyProvider {
+                    proxy = proxyProvider(onError)
+                } else {
+                    proxy = connection?.remoteObjectProxyWithErrorHandler(onError) as? ProcexpHelperProtocol
+                }
+                guard let proxy else {
+                    box.resume(throwing: ProviderError.helperUnavailable)
+                    return
+                }
+                body(proxy, box)
+            }
+        } onCancel: {
+            box.resume(throwing: CancellationError())
         }
     }
 
@@ -286,24 +330,52 @@ public final class PrivilegedDataProvider: PrivilegedSampling, @unchecked Sendab
 /// checked continuation.
 private final class ContinuationBox<T>: @unchecked Sendable {
     private let lock = NSLock()
-    private var resumed = false
-    private let continuation: CheckedContinuation<T, Error>
+    private var result: Result<T, Error>?
+    private var continuation: CheckedContinuation<T, Error>?
+    private var timeout: DispatchWorkItem?
 
-    init(_ continuation: CheckedContinuation<T, Error>) {
+    func install(_ continuation: CheckedContinuation<T, Error>) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if let result {
+            continuation.resume(with: result)
+            return false
+        }
         self.continuation = continuation
+        return true
+    }
+
+    func scheduleTimeout(after seconds: TimeInterval, onTimeout: @escaping () -> Void) {
+        let item = DispatchWorkItem { [weak self] in
+            if self?.finish(.failure(ProviderError.underlying(
+                "The privileged helper did not respond within \(seconds) seconds."
+            ))) == true { onTimeout() }
+        }
+        lock.lock()
+        if result == nil { timeout = item } else { item.cancel() }
+        lock.unlock()
+        DispatchQueue.global().asyncAfter(deadline: .now() + seconds, execute: item)
     }
 
     func resume(returning value: T) {
-        lock.lock(); defer { lock.unlock() }
-        guard !resumed else { return }
-        resumed = true
-        continuation.resume(returning: value)
+        finish(.success(value))
     }
 
     func resume(throwing error: Error) {
-        lock.lock(); defer { lock.unlock() }
-        guard !resumed else { return }
-        resumed = true
-        continuation.resume(throwing: error)
+        finish(.failure(error))
+    }
+
+    @discardableResult
+    private func finish(_ result: Result<T, Error>) -> Bool {
+        lock.lock()
+        guard self.result == nil else { lock.unlock(); return false }
+        self.result = result
+        let continuation = self.continuation
+        self.continuation = nil
+        timeout?.cancel()
+        timeout = nil
+        lock.unlock()
+        continuation?.resume(with: result)
+        return true
     }
 }
