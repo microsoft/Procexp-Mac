@@ -141,6 +141,9 @@ public struct ProcessRecord: Identifiable, Sendable, Hashable {
     public var gpuPercent: Double?
     public var autostartLocation: String?
 
+    /// Jetsam/resource coalition membership (see `Coalition.swift`).
+    public var coalition: CoalitionMembership?
+
     public var startTimeDate: Date
 
     public init(
@@ -191,6 +194,7 @@ public struct ProcessRecord: Identifiable, Sendable, Hashable {
         networkBytesPerSec: UInt64? = nil,
         gpuPercent: Double? = nil,
         autostartLocation: String? = nil,
+        coalition: CoalitionMembership? = nil,
         startTimeDate: Date = .distantPast
     ) {
         self.id = id
@@ -240,6 +244,7 @@ public struct ProcessRecord: Identifiable, Sendable, Hashable {
         self.networkBytesPerSec = networkBytesPerSec
         self.gpuPercent = gpuPercent
         self.autostartLocation = autostartLocation
+        self.coalition = coalition
         self.startTimeDate = startTimeDate
     }
 }

@@ -1,4 +1,5 @@
 import Testing
+import Foundation
 import ProcexpModel
 @testable import ProcexpPrivileged
 
@@ -46,6 +47,26 @@ struct PrivilegedDTOTests {
         #expect(roundTrip.machMessagesReceived == 9)
         #expect(roundTrip.machSyscalls == 10)
         #expect(roundTrip.unixSyscalls == 11)
+    }
+
+    @Test("ProcessRecordDTO carries coalition membership, and old payloads without it still decode")
+    func processRecordDTOCoalition() throws {
+        let leader = ProcessID(pid: 100, startTime: 1)
+        let record = ProcessRecord(
+            id: ProcessID(pid: 101, startTime: 2),
+            name: "svc",
+            coalition: CoalitionMembership(resourceID: 864, jetsamID: 865, role: .xpcService,
+                                           leader: leader, leaderName: "Safari",
+                                           memberCount: 3, groupParent: leader)
+        )
+        let data = try JSONEncoder().encode(ProcessRecordDTO(record))
+        let decoded = try JSONDecoder().decode(ProcessRecordDTO.self, from: data).model
+        #expect(decoded.coalition == record.coalition)
+
+        var object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        object.removeValue(forKey: "coalition")
+        let legacy = try JSONSerialization.data(withJSONObject: object)
+        #expect(try JSONDecoder().decode(ProcessRecordDTO.self, from: legacy).coalition == nil)
     }
 
     @Test("ThreadInfoDTO preserves extended thread details")

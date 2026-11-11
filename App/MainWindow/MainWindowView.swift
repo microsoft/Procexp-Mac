@@ -169,6 +169,7 @@ struct MainWindowView: View {
                            columns: model.columns,
                            colorRules: model.colorRules,
                            treeMode: model.showProcessTree,
+                           groupByCoalition: model.groupByCoalition,
                            treeSortResetToken: model.processTreeSortResetToken,
                            searchText: model.processFilter,
                            revealRequestToken: model.processRevealRequestToken) { command, pid in
@@ -237,6 +238,11 @@ struct MainWindowView: View {
                        tip: "Show Process Tree (⌥T)",
                        shortcut: .init("t", modifiers: .option)) {
                 model.setProcessTreeView(!model.showProcessTree)
+            }
+            symbolToggle("rectangle.3.group",
+                         isOn: model.showProcessTree && model.groupByCoalition,
+                         tip: "Group by Coalition (⌥C): show XPC services and extensions under the app they work for") {
+                model.setGroupByCoalition(!(model.showProcessTree && model.groupByCoalition))
             }
             iconButton("props", tip: "Properties… (⌥↩)",
                        shortcut: .init(.return, modifiers: .option),
@@ -362,6 +368,26 @@ struct MainWindowView: View {
                 .disabled(disabled)
                 .help(tip)
         }
+    }
+
+    /// Toolbar toggle drawn with an SF Symbol (for actions without a bundled icon).
+    private func symbolToggle(_ systemName: String,
+                              isOn: Bool,
+                              tip: String,
+                              action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 14, weight: .medium))
+                .frame(width: 18, height: 18)
+                .padding(3)
+                .background {
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(isOn ? Color.accentColor.opacity(0.30) : Color.clear)
+                }
+        }
+        .accessibilityIdentifier("toolbar-\(systemName)")
+        .buttonStyle(.borderless)
+        .help(tip)
     }
 
     /// A colored-icon toggle button that highlights while active.

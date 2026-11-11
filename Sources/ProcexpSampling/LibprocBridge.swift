@@ -118,6 +118,36 @@ enum Libproc {
         return rc == size ? info : nil
     }
 
+    // MARK: - Per-PID coalition IDs
+
+    /// `PROC_PIDCOALITIONINFO` from xnu `bsd/sys/proc_info.h`. The flavor and
+    /// struct are not in the public SDK headers, so they are mirrored here.
+    /// The call itself is unprivileged and works for other users' processes.
+    static let procPIDCoalitionInfo: Int32 = 20
+
+    /// Layout of xnu `struct proc_pidcoalitioninfo`:
+    /// `uint64_t coalition_id[COALITION_NUM_TYPES]; uint64_t reserved1..3;`
+    /// with `COALITION_TYPE_RESOURCE = 0`, `COALITION_TYPE_JETSAM = 1`.
+    struct ProcPIDCoalitionInfo {
+        var resourceID: UInt64 = 0
+        var jetsamID: UInt64 = 0
+        var reserved1: UInt64 = 0
+        var reserved2: UInt64 = 0
+        var reserved3: UInt64 = 0
+    }
+
+    /// Coalition IDs for `pid`, or `nil` if the kernel does not report them
+    /// (process gone, or a kernel without the flavor).
+    static func coalition(_ pid: pid_t) -> CoalitionMembership? {
+        var info = ProcPIDCoalitionInfo()
+        let size = Int32(MemoryLayout<ProcPIDCoalitionInfo>.size)
+        let rc = withUnsafeMutablePointer(to: &info) {
+            proc_pidinfo(pid, procPIDCoalitionInfo, 0, $0, size)
+        }
+        guard rc == size, info.jetsamID != 0 || info.resourceID != 0 else { return nil }
+        return CoalitionMembership(resourceID: info.resourceID, jetsamID: info.jetsamID)
+    }
+
     // MARK: - Per-PID task info (cpu / threads / memory / faults)
 
     static func taskInfo(_ pid: pid_t) -> proc_taskinfo? {

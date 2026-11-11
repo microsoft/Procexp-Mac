@@ -127,6 +127,66 @@ struct ProcessOutlineRegression {
         try check(container.metricsBodyScrollView.contentView.bounds.minX == 0,
                   "Narrowed metric document retained an invalid horizontal offset")
         print("PASS: unchanged refresh, document growth, resize, column removal, and synchronized scroll preservation")
+
+        // Group by Coalition: an XPC service spawned by launchd nests under
+        // the app whose jetsam coalition it shares, and filtering keeps the app.
+        let safariID = ProcessID(pid: 600, startTime: 1)
+        let webkitID = ProcessID(pid: 601, startTime: 1)
+        var coalitionRecords: [ProcessID: ProcessRecord] = [
+            root: ProcessRecord(id: root, parent: nil, name: "launchd",
+                                coalition: CoalitionMembership(resourceID: 2, jetsamID: 3)),
+            safariID: ProcessRecord(id: safariID, parent: root, name: "Safari",
+                                    executablePath: "/Applications/Safari.app/Contents/MacOS/Safari",
+                                    coalition: CoalitionMembership(resourceID: 864, jetsamID: 865),
+                                    startTimeDate: Date(timeIntervalSince1970: 10)),
+            webkitID: ProcessRecord(id: webkitID, parent: root, name: "com.apple.WebKit.GPU",
+                                    executablePath: "/S/WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU",
+                                    coalition: CoalitionMembership(resourceID: 864, jetsamID: 865),
+                                    startTimeDate: Date(timeIntervalSince1970: 11)),
+        ]
+        CoalitionResolver.resolve(&coalitionRecords)
+        let coalitionTree = ProcessTreeBuilder.build(from: coalitionRecords)
+        let coalitionSnapshot = ProcessSnapshot(timestamp: Date(), interval: 1, processes: coalitionRecords,
+                                                roots: coalitionTree.roots, children: coalitionTree.children,
+                                                system: .zero)
+        func rowNames() throws -> [String] {
+            // Rows from the previous fixture linger briefly as "deleted"; ignore them.
+            let fixtureNames: Set<String> = ["launchd", "Safari", "com.apple.WebKit.GPU"]
+            return try coordinator.reportTable().rows
+                .compactMap { $0.first?.trimmingCharacters(in: .whitespaces) }
+                .filter(fixtureNames.contains)
+        }
+        func updateCoalition(_ query: String, grouped: Bool) {
+            model.snapshot = coalitionSnapshot
+            coordinator.update(snapshot: coalitionSnapshot, columns: columns, colorRules: [],
+                               treeMode: true, groupByCoalition: grouped, treeSortResetToken: 0,
+                               searchText: query)
+            container.layoutSubtreeIfNeeded()
+        }
+        updateCoalition("", grouped: false)
+        try check(try rowNames() == ["launchd", "Safari", "com.apple.WebKit.GPU"],
+                  "BSD tree should list both under launchd: \(try rowNames())")
+        updateCoalition("", grouped: true)
+        let grouped = try rowNames()
+        try check(grouped.firstIndex(of: "com.apple.WebKit.GPU") == grouped.firstIndex(of: "Safari").map { $0 + 1 },
+                  "Coalition view should put the XPC service right under Safari: \(grouped)")
+        updateCoalition("WebKit", grouped: true)
+        try check(try rowNames() == ["Safari", "com.apple.WebKit.GPU"],
+                  "Filtering in coalition view should keep the leader as ancestor: \(try rowNames())")
+        updateCoalition("safari", grouped: true)
+        try check(try rowNames() == ["Safari", "com.apple.WebKit.GPU"],
+                  "Filtering for the app in coalition view should include its helpers: \(try rowNames())")
+        updateCoalition("safari", grouped: false)
+        try check(try rowNames() == ["launchd", "Safari"],
+                  "BSD tree filter should not pull in coalition members: \(try rowNames())")
+        updateCoalition("", grouped: false)
+        model.columns = [.name, .pid, .cpu]
+        model.setGroupByCoalition(true)
+        try check(model.columns == [.name, .pid, .coalitionRole, .coalitionLeader, .cpu],
+                  "Turning on coalition grouping should add role/leader columns after PID: \(model.columns)")
+        try check(model.showProcessTree, "Turning on coalition grouping should show the tree")
+        model.setGroupByCoalition(false)
+        print("PASS: group by coalition nests XPC services under their app and keeps the leader when filtering")
         print("All process-outline regressions passed.")
     }
 }

@@ -17,6 +17,7 @@ The app is built with Swift, SwiftUI, and AppKit, with sampling backed by public
 - Native menu bar with File, Options, View, Process, Find, Window, and Help commands.
 - Toolbar actions for refresh, save, process properties, kill, lower pane, find handle/DLL, target-window picker, and System Information graphs.
 - Lower pane modes for DLLs/images, handles/file descriptors, and threads.
+- Jetsam coalition columns and a **View > Group by Coalition** tree that nests XPC services and extensions under the app they work for (roles and leaders are inferred).
 - Lower-pane row highlighting for newly appeared and deleted items.
 - Per-process Properties window with Image, Performance, Performance Graph, Threads, TCP/IP, Security, Environment, and Strings tabs.
 - TCP/IP tab with local address, remote address, async reverse-DNS remote name lookup, TCP state, and column persistence.

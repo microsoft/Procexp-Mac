@@ -32,7 +32,8 @@ public enum Column: String, CaseIterable, Sendable, Codable {
          runningThreads, pageIns, cowFaults, machMessagesSent,
          machMessagesReceived, machSyscalls, unixSyscalls, threadUserTime,
          threadSystemTime, taskPolicy, bsdFlags,
-         network, gpu, gpuMemory, integrity, signature, virusTotal, autostart
+         network, gpu, gpuMemory, integrity, signature, virusTotal, autostart,
+         coalition, coalitionRole, coalitionLeader
 
     public var title: String {
         switch self {
@@ -76,6 +77,9 @@ public enum Column: String, CaseIterable, Sendable, Codable {
         case .signature:    return "Verified Signer"
         case .virusTotal:   return "VirusTotal"
         case .autostart:    return "Autostart Location"
+        case .coalition:    return "Coalition"
+        case .coalitionRole: return "Coalition Role (inferred)"
+        case .coalitionLeader: return "Coalition Leader (inferred)"
         }
     }
 
@@ -115,13 +119,17 @@ public enum Column: String, CaseIterable, Sendable, Codable {
         case .signature:    return 240
         case .virusTotal:   return 82
         case .autostart:    return 260
+        case .coalition:    return 80
+        case .coalitionRole: return 150
+        case .coalitionLeader: return 200
         }
     }
 
     public var isRightAligned: Bool {
         switch self {
         case .name, .description, .company, .version, .path, .commandLine,
-             .user, .startTime, .signature, .autostart, .integrity:
+             .user, .startTime, .signature, .autostart, .integrity,
+             .coalitionRole, .coalitionLeader:
             return false
         default:
             return true
@@ -191,6 +199,13 @@ public enum Column: String, CaseIterable, Sendable, Codable {
             guard let vt = p.signing?.virusTotal else { return "" }
             return "\(vt.positives)/\(vt.total)"
         case .autostart:    return p.autostartLocation ?? ""
+        case .coalition:    return p.coalition.map { String($0.jetsamID) } ?? ""
+        case .coalitionRole:
+            guard let c = p.coalition, c.isShared else { return "" }
+            return c.role?.title ?? ""
+        case .coalitionLeader:
+            guard let c = p.coalition, c.isShared, let leader = c.leader else { return "" }
+            return "\(c.leaderName ?? "pid") (\(leader.pid))"
         }
     }
 
@@ -237,6 +252,8 @@ public enum Column: String, CaseIterable, Sendable, Codable {
         case .signature:    return .text(p.signing?.signerDescription ?? "")
         case .virusTotal:   return .number(Double(p.signing?.virusTotal?.positives ?? -1))
         case .autostart:    return .text(p.autostartLocation ?? "")
+        case .coalition:    return p.coalition.map { .number(Double($0.jetsamID)) } ?? .none
+        case .coalitionRole, .coalitionLeader: return .text(string(for: p))
         }
     }
 
