@@ -41,50 +41,22 @@ public final class SparklineView: NSView {
     public override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
+        clipsToBounds = true
     }
 
     public required init?(coder: NSCoder) {
         super.init(coder: coder)
         wantsLayer = true
+        clipsToBounds = true
     }
 
     public override var isFlipped: Bool { false }
 
     public override func draw(_ dirtyRect: NSRect) {
-        let bounds = self.bounds
-
-        // Background.
         NSColor(graphBackgroundColor).setFill()
         bounds.fill()
 
-        guard values.count > 1, bounds.width > 0, bounds.height > 0 else { return }
-
-        let denom = maxValue.isFinite && maxValue > 0 ? maxValue : 1
-        let stepX = bounds.width / CGFloat(values.count - 1)
-
-        func point(at index: Int) -> NSPoint {
-            let clamped = min(max(values[index], 0), denom)
-            let y = bounds.minY + CGFloat(clamped / denom) * bounds.height
-            let x = bounds.minX + CGFloat(index) * stepX
-            return NSPoint(x: x, y: y)
-        }
-
-        for segment in values.indices.split(whereSeparator: { !values[$0].isFinite }) {
-            guard let first = segment.first, let last = segment.last, first != last else { continue }
-            let fill = NSBezierPath()
-            fill.move(to: NSPoint(x: point(at: first).x, y: bounds.minY))
-            for index in segment { fill.line(to: point(at: index)) }
-            fill.line(to: NSPoint(x: point(at: last).x, y: bounds.minY))
-            fill.close()
-            NSColor(fillColor).setFill()
-            fill.fill()
-
-            let line = NSBezierPath()
-            line.lineWidth = 1
-            line.move(to: point(at: first))
-            for index in segment.dropFirst() { line.line(to: point(at: index)) }
-            NSColor(lineColor).setStroke()
-            line.stroke()
-        }
+        GraphPlot(bounds: bounds, maxValue: maxValue)
+            .drawSeries(values, line: NSColor(lineColor), fill: NSColor(fillColor))
     }
 }
