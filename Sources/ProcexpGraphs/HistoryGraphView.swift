@@ -54,84 +54,48 @@ public final class HistoryGraphView: NSView {
     public override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
+        clipsToBounds = true
     }
 
     public required init?(coder: NSCoder) {
         super.init(coder: coder)
         wantsLayer = true
+        clipsToBounds = true
     }
 
     public override var isFlipped: Bool { false }
 
     public override func draw(_ dirtyRect: NSRect) {
-        let bounds = self.bounds
-        guard bounds.width > 0, bounds.height > 0 else { return }
-
         NSColor(graphBackgroundColor).setFill()
         bounds.fill()
 
+        let plot = GraphPlot(bounds: bounds, maxValue: maxValue)
         if showGrid {
-            drawGrid(in: bounds)
+            drawGrid(in: plot.rect)
         }
-
-        let denom = maxValue.isFinite && maxValue > 0 ? maxValue : 1
         for (index, samples) in series.enumerated() {
-            let color = seriesColors.indices.contains(index)
-                ? seriesColors[index]
-                : RGBA(0, 200, 0)
-            draw(samples: samples, color: color, denom: denom, in: bounds)
+            let rgba = seriesColors.indices.contains(index) ? seriesColors[index] : RGBA(0, 200, 0)
+            let color = NSColor(rgba)
+            plot.drawSeries(samples, line: color, fill: color.withAlphaComponent(0.20))
         }
     }
 
-    private func drawGrid(in bounds: NSRect) {
+    /// Grid lines span the plot area, so the outer lines coincide with the
+    /// 0 and maximum levels of the series and stay inside the view.
+    private func drawGrid(in rect: NSRect) {
         guard gridDivisions > 0 else { return }
-        NSColor(gridColor).setStroke()
         let path = NSBezierPath()
         path.lineWidth = 0.5
-
-        // Horizontal lines.
         for step in 0...gridDivisions {
-            let y = bounds.minY + bounds.height * CGFloat(step) / CGFloat(gridDivisions)
-            path.move(to: NSPoint(x: bounds.minX, y: y))
-            path.line(to: NSPoint(x: bounds.maxX, y: y))
+            let fraction = CGFloat(step) / CGFloat(gridDivisions)
+            let y = rect.minY + rect.height * fraction
+            let x = rect.minX + rect.width * fraction
+            path.move(to: NSPoint(x: rect.minX, y: y))
+            path.line(to: NSPoint(x: rect.maxX, y: y))
+            path.move(to: NSPoint(x: x, y: rect.minY))
+            path.line(to: NSPoint(x: x, y: rect.maxY))
         }
-        // Vertical lines.
-        for step in 0...gridDivisions {
-            let x = bounds.minX + bounds.width * CGFloat(step) / CGFloat(gridDivisions)
-            path.move(to: NSPoint(x: x, y: bounds.minY))
-            path.line(to: NSPoint(x: x, y: bounds.maxY))
-        }
+        NSColor(gridColor).setStroke()
         path.stroke()
-    }
-
-    private func draw(samples: [Double], color: RGBA, denom: Double, in bounds: NSRect) {
-        guard samples.count > 1 else { return }
-        let stepX = bounds.width / CGFloat(samples.count - 1)
-
-        func point(at index: Int) -> NSPoint {
-            let clamped = min(max(samples[index], 0), denom)
-            let y = bounds.minY + CGFloat(clamped / denom) * bounds.height
-            let x = bounds.minX + CGFloat(index) * stepX
-            return NSPoint(x: x, y: y)
-        }
-
-        // Unavailable samples retain their time slot without connecting across the gap.
-        for segment in samples.indices.split(whereSeparator: { !samples[$0].isFinite }) {
-            guard let first = segment.first, let last = segment.last, first != last else { continue }
-            let fill = NSBezierPath()
-            fill.move(to: NSPoint(x: point(at: first).x, y: bounds.minY))
-            for index in segment { fill.line(to: point(at: index)) }
-            fill.line(to: NSPoint(x: point(at: last).x, y: bounds.minY))
-            fill.close()
-            NSColor(RGBA(r: color.r, g: color.g, b: color.b, a: 0.20)).setFill()
-            fill.fill()
-
-            let line = NSBezierPath()
-            line.lineWidth = 1
-            line.move(to: point(at: first))
-            for index in segment.dropFirst() { line.line(to: point(at: index)) }
-            NSColor(color).setStroke()
-            line.stroke()
-        }
     }
 }
