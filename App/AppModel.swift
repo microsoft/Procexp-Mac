@@ -657,7 +657,9 @@ final class AppModel {
         let interval = refreshInterval
         let system = self.system
         streamTask = Task { @MainActor in
-            for await snap in provider.snapshots(interval: interval) {
+            for await streamed in provider.snapshots(interval: interval) {
+                guard !Task.isCancelled, self.streamGeneration == generation else { return }
+                let snap = await self.fallbackIfHelperFailed(streamed)
                 guard !Task.isCancelled, self.streamGeneration == generation else { return }
                 self.publicationGeneration += 1
                 let publication = self.publicationGeneration
@@ -672,6 +674,15 @@ final class AppModel {
                 if Task.isCancelled { break }
             }
         }
+    }
+
+    /// `PrivilegedDataProvider.snapshot()` degrades to `.empty` when the helper
+    /// is unreachable or rejects the connection. A live system always has
+    /// processes, so an empty privileged frame means the helper failed: sample
+    /// unprivileged for that frame instead of clearing the process list.
+    private func fallbackIfHelperFailed(_ snap: ProcessSnapshot) async -> ProcessSnapshot {
+        guard privileged != nil, snap.processes.isEmpty else { return snap }
+        return await libproc.snapshot()
     }
 
     func stop() {
@@ -697,7 +708,7 @@ final class AppModel {
         publicationGeneration += 1
         let publication = publicationGeneration
         let provider: any ProcessDataProviding = data
-        let snap = await provider.snapshot()
+        let snap = await fallbackIfHelperFailed(await provider.snapshot())
         guard !Task.isCancelled, streamGeneration == generation,
               publicationGeneration == publication else { return }
         let stats = await system.stats()

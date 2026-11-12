@@ -105,10 +105,12 @@ enum PeerValidation {
             return nil
         }
 
+        // `kSecCodeInfoTeamIdentifier` is only populated when signing
+        // information is requested; with no flags it is always absent.
         var signingInformation: CFDictionary?
         guard SecCodeCopySigningInformation(
             ownStaticCode,
-            SecCSFlags(rawValue: 0),
+            SecCSFlags(rawValue: kSecCSSigningInformation),
             &signingInformation
         ) == errSecSuccess,
               let information = signingInformation as? [CFString: Any] else {
